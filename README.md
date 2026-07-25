@@ -40,9 +40,10 @@ One plugin, contract `interfaces: [Notifier]`, built around a pluggable-backend 
   self-registers from its own `init()`.
 - Each registered **device** (`sdk.NotifierDevice`) is one delivery target bound to one backend,
   holding that backend's validated config in its metadata. Register as many devices as you like,
-  across the same or different backends, and they all fire in parallel.
-- `sendNotification` dispatches every targeted device to its backend's `Send`. A single backend
-  failure is logged and returned to the host, but never aborts delivery to the others.
+  across the same or different backends — each one receives every notification.
+- `sendNotification` dispatches every targeted device to its backend's `Send`, one device at a
+  time (sequentially, not in parallel). A single backend failure is logged and returned to the
+  host, but never aborts delivery to the remaining devices.
 
 Adding a new backend later is **one new file** — `src/backend/<name>.go` implementing `Backend`
 plus `Register(...)` in its `init()` — and a version bump. No new plugin, no core change, no
@@ -108,7 +109,8 @@ From the camera.ui **notifications/devices** UI:
    are now delivered to it until it's deactivated or revoked.
 
 You can register multiple devices — e.g. an ntfy topic for yourself and a Gotify server for a
-household — and every active device receives every notification independently.
+household — and every active device receives every notification (delivered sequentially, one
+device after another, not in parallel).
 
 ## Tech stack
 

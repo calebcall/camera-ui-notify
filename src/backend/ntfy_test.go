@@ -17,7 +17,7 @@ func TestNtfyParseTargetMissingTopic(t *testing.T) {
 	if _, err := n.ParseTarget(map[string]any{}); err == nil {
 		t.Fatalf("ParseTarget with no topic: got nil error, want error")
 	}
-	if _, err := n.ParseTarget(map[string]any{"topic": ""}); err == nil {
+	if _, err := n.ParseTarget(map[string]any{"ntfy_topic": ""}); err == nil {
 		t.Fatalf("ParseTarget with empty topic: got nil error, want error")
 	}
 }
@@ -25,7 +25,7 @@ func TestNtfyParseTargetMissingTopic(t *testing.T) {
 func TestNtfyParseTargetServerDefault(t *testing.T) {
 	n := &ntfy{}
 
-	cfg, err := n.ParseTarget(map[string]any{"topic": "alerts"})
+	cfg, err := n.ParseTarget(map[string]any{"ntfy_topic": "alerts"})
 	if err != nil {
 		t.Fatalf("ParseTarget: unexpected error: %v", err)
 	}
@@ -44,8 +44,8 @@ func TestNtfyParseTargetTrimsTrailingSlash(t *testing.T) {
 	n := &ntfy{}
 
 	cfg, err := n.ParseTarget(map[string]any{
-		"server": "https://ntfy.example.com/",
-		"topic":  "alerts",
+		"ntfy_server": "https://ntfy.example.com/",
+		"ntfy_topic":  "alerts",
 	})
 	if err != nil {
 		t.Fatalf("ParseTarget: unexpected error: %v", err)
@@ -59,8 +59,8 @@ func TestNtfyParseTargetTokenPassthrough(t *testing.T) {
 	n := &ntfy{}
 
 	cfg, err := n.ParseTarget(map[string]any{
-		"topic": "alerts",
-		"token": "tk_secret",
+		"ntfy_topic": "alerts",
+		"ntfy_token": "tk_secret",
 	})
 	if err != nil {
 		t.Fatalf("ParseTarget: unexpected error: %v", err)
@@ -285,25 +285,25 @@ func TestNtfySchemaConditions(t *testing.T) {
 		}
 	}
 
-	server, ok := byKey["server"]
+	server, ok := byKey["ntfy_server"]
 	if !ok {
-		t.Fatalf("schema missing %q field", "server")
+		t.Fatalf("schema missing %q field", "ntfy_server")
 	}
 	if server.DefaultValue != "https://ntfy.sh" {
 		t.Errorf("server DefaultValue = %v, want %q", server.DefaultValue, "https://ntfy.sh")
 	}
 
-	topic, ok := byKey["topic"]
+	topic, ok := byKey["ntfy_topic"]
 	if !ok {
-		t.Fatalf("schema missing %q field", "topic")
+		t.Fatalf("schema missing %q field", "ntfy_topic")
 	}
 	if !topic.Required {
 		t.Errorf("topic Required = false, want true")
 	}
 
-	token, ok := byKey["token"]
+	token, ok := byKey["ntfy_token"]
 	if !ok {
-		t.Fatalf("schema missing %q field", "token")
+		t.Fatalf("schema missing %q field", "ntfy_token")
 	}
 	if token.Format != sdk.StringFormatPassword {
 		t.Errorf("token Format = %q, want %q", token.Format, sdk.StringFormatPassword)

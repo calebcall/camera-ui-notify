@@ -32,7 +32,9 @@ func TestRegisterGetAll(t *testing.T) {
 	alpha := &fakeBackend{id: "alpha-registry-test", label: "Alpha"}
 
 	Register(zed)
+	t.Cleanup(func() { unregister(zed.ID()) })
 	Register(alpha)
+	t.Cleanup(func() { unregister(alpha.ID()) })
 
 	got, ok := Get("zed-registry-test")
 	if !ok || got != Backend(zed) {
@@ -72,14 +74,16 @@ func TestRegisterGetAll(t *testing.T) {
 }
 
 func TestRegisterPanicsOnDuplicate(t *testing.T) {
-	Register(&fakeBackend{id: "dup-registry-test", label: "First"})
+	const id = "dup-registry-test"
+	Register(&fakeBackend{id: id, label: "First"})
+	t.Cleanup(func() { unregister(id) })
 
 	defer func() {
 		if r := recover(); r == nil {
 			t.Fatalf("Register did not panic on duplicate id")
 		}
 	}()
-	Register(&fakeBackend{id: "dup-registry-test", label: "Second"})
+	Register(&fakeBackend{id: id, label: "Second"})
 }
 
 func TestPriorityScaleBoundaries(t *testing.T) {

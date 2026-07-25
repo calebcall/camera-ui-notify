@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -17,8 +16,10 @@ import (
 
 // gotify implements Backend for a self-hosted Gotify server
 // (https://gotify.net/docs/pushmsg). Delivery is a single HTTP POST to the
-// server's /message endpoint, authenticated via an application token query
-// parameter.
+// server's /message endpoint, authenticated via an application token sent
+// in the X-Gotify-Key request header (rather than a ?token= query
+// parameter) so the token never appears in a *url.Error message logged on
+// transport failure.
 type gotify struct {
 	// client performs the HTTP request. Defaulted by newGotify; overridable
 	// in tests so Send never touches the real network.
@@ -46,7 +47,7 @@ func (g *gotify) Schema() []sdk.JsonSchema {
 	return []sdk.JsonSchema{
 		{
 			Type:        sdk.JsonSchemaTypeString,
-			Key:         "server",
+			Key:         "gotify_server",
 			Title:       "Server",
 			Description: "Base URL of the Gotify server.",
 			Required:    true,
@@ -54,7 +55,7 @@ func (g *gotify) Schema() []sdk.JsonSchema {
 		},
 		{
 			Type:        sdk.JsonSchemaTypeString,
-			Key:         "token",
+			Key:         "gotify_token",
 			Title:       "Application token",
 			Description: "Gotify application token used to authenticate published messages.",
 			Format:      sdk.StringFormatPassword,
@@ -65,16 +66,19 @@ func (g *gotify) Schema() []sdk.JsonSchema {
 }
 
 // ParseTarget validates the raw registration input and returns the
-// normalized config persisted in NotifierDevice.Metadata.
+// normalized config persisted in NotifierDevice.Metadata. Schema field keys
+// are namespaced (gotify_*) so they don't collide with other backends'
+// fields in the flattened NotificationSettings() form; the returned cfg
+// uses the short keys Send reads.
 func (g *gotify) ParseTarget(input map[string]any) (map[string]string, error) {
-	server, _ := input["server"].(string)
+	server, _ := input["gotify_server"].(string)
 	server = strings.TrimSpace(server)
 	if server == "" {
 		return nil, errors.New("gotify: server is required")
 	}
 	server = strings.TrimRight(server, "/")
 
-	token, _ := input["token"].(string)
+	token, _ := input["gotify_token"].(string)
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return nil, errors.New("gotify: token is required")
@@ -149,7 +153,7 @@ func (g *gotify) Send(ctx context.Context, cfg map[string]string, notif sdk.Noti
 		return fmt.Errorf("gotify: encode payload: %w", err)
 	}
 
-	reqURL := server + "/message?" + url.Values{"token": {token}}.Encode()
+	reqURL := server + "/message"
 
 	if ctx == nil {
 		ctx = context.Background()
@@ -159,6 +163,7 @@ func (g *gotify) Send(ctx context.Context, cfg map[string]string, notif sdk.Noti
 		return fmt.Errorf("gotify: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Gotify-Key", token)
 
 	client := g.client
 	if client == nil {

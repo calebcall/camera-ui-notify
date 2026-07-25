@@ -47,7 +47,7 @@ func (n *ntfy) Schema() []sdk.JsonSchema {
 	return []sdk.JsonSchema{
 		{
 			Type:         sdk.JsonSchemaTypeString,
-			Key:          "server",
+			Key:          "ntfy_server",
 			Title:        "Server",
 			Description:  "Base URL of the ntfy server.",
 			DefaultValue: defaultNtfyServer,
@@ -55,7 +55,7 @@ func (n *ntfy) Schema() []sdk.JsonSchema {
 		},
 		{
 			Type:        sdk.JsonSchemaTypeString,
-			Key:         "topic",
+			Key:         "ntfy_topic",
 			Title:       "Topic",
 			Description: "The ntfy topic to publish to.",
 			Required:    true,
@@ -63,7 +63,7 @@ func (n *ntfy) Schema() []sdk.JsonSchema {
 		},
 		{
 			Type:        sdk.JsonSchemaTypeString,
-			Key:         "token",
+			Key:         "ntfy_token",
 			Title:       "Access Token",
 			Description: "Optional access token for a protected topic.",
 			Format:      sdk.StringFormatPassword,
@@ -73,15 +73,18 @@ func (n *ntfy) Schema() []sdk.JsonSchema {
 }
 
 // ParseTarget validates the raw registration input and returns the
-// normalized config persisted in NotifierDevice.Metadata.
+// normalized config persisted in NotifierDevice.Metadata. Schema field keys
+// are namespaced (ntfy_*) so they don't collide with other backends' fields
+// in the flattened NotificationSettings() form; the returned cfg uses the
+// short keys Send reads.
 func (n *ntfy) ParseTarget(input map[string]any) (map[string]string, error) {
-	topic, _ := input["topic"].(string)
+	topic, _ := input["ntfy_topic"].(string)
 	topic = strings.TrimSpace(topic)
 	if topic == "" {
 		return nil, errors.New("ntfy: topic is required")
 	}
 
-	server, _ := input["server"].(string)
+	server, _ := input["ntfy_server"].(string)
 	server = strings.TrimSpace(server)
 	if server == "" {
 		server = defaultNtfyServer
@@ -93,7 +96,7 @@ func (n *ntfy) ParseTarget(input map[string]any) (map[string]string, error) {
 		"topic":  topic,
 	}
 
-	if token, _ := input["token"].(string); token != "" {
+	if token, _ := input["ntfy_token"].(string); token != "" {
 		cfg["token"] = token
 	}
 

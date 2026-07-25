@@ -49,7 +49,7 @@ func (w *webhook) Schema() []sdk.JsonSchema {
 	return []sdk.JsonSchema{
 		{
 			Type:        sdk.JsonSchemaTypeString,
-			Key:         "url",
+			Key:         "webhook_url",
 			Title:       "URL",
 			Description: "Endpoint that receives the notification.",
 			Required:    true,
@@ -57,7 +57,7 @@ func (w *webhook) Schema() []sdk.JsonSchema {
 		},
 		{
 			Type:         sdk.JsonSchemaTypeString,
-			Key:          "method",
+			Key:          "webhook_method",
 			Title:        "Method",
 			Description:  "HTTP method used to deliver the notification.",
 			Enum:         []string{http.MethodPost, http.MethodPut},
@@ -66,14 +66,14 @@ func (w *webhook) Schema() []sdk.JsonSchema {
 		},
 		{
 			Type:        sdk.JsonSchemaTypeString,
-			Key:         "headerName",
+			Key:         "webhook_headerName",
 			Title:       "Header name",
 			Description: "Optional custom header sent with every request (e.g. for a shared secret).",
 			Condition:   cond,
 		},
 		{
 			Type:        sdk.JsonSchemaTypeString,
-			Key:         "headerValue",
+			Key:         "webhook_headerValue",
 			Title:       "Header value",
 			Description: "Value of the custom header. Required if header name is set.",
 			Format:      sdk.StringFormatPassword,
@@ -83,15 +83,18 @@ func (w *webhook) Schema() []sdk.JsonSchema {
 }
 
 // ParseTarget validates the raw registration input and returns the
-// normalized config persisted in NotifierDevice.Metadata.
+// normalized config persisted in NotifierDevice.Metadata. Schema field keys
+// are namespaced (webhook_*) so they don't collide with other backends'
+// fields in the flattened NotificationSettings() form; the returned cfg
+// uses the short keys Send reads.
 func (w *webhook) ParseTarget(input map[string]any) (map[string]string, error) {
-	rawURL, _ := input["url"].(string)
+	rawURL, _ := input["webhook_url"].(string)
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		return nil, errors.New("webhook: url is required")
 	}
 
-	method, _ := input["method"].(string)
+	method, _ := input["webhook_method"].(string)
 	method = strings.ToUpper(strings.TrimSpace(method))
 	if method == "" {
 		method = http.MethodPost
@@ -100,9 +103,9 @@ func (w *webhook) ParseTarget(input map[string]any) (map[string]string, error) {
 		return nil, fmt.Errorf("webhook: method must be POST or PUT, got %q", method)
 	}
 
-	headerName, _ := input["headerName"].(string)
+	headerName, _ := input["webhook_headerName"].(string)
 	headerName = strings.TrimSpace(headerName)
-	headerValue, _ := input["headerValue"].(string)
+	headerValue, _ := input["webhook_headerValue"].(string)
 	headerValue = strings.TrimSpace(headerValue)
 
 	if headerName != "" && headerValue == "" {

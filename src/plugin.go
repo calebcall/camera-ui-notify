@@ -12,6 +12,14 @@ import (
 // writes to this key depends on it being declared exactly once, here.
 const devicesStorageKey = "devices"
 
+// Compile-time conformance guards. NotifyPlugin must satisfy both sdk.Plugin
+// (the camera lifecycle hooks) and sdk.NotifierInterface (the Notifier RPC
+// surface implemented across src/notifier.go) — these fail `go build` loudly
+// on any future signature drift instead of surfacing as a silent RPC
+// registration gap discovered only at runtime.
+var _ sdk.NotifierInterface = (*NotifyPlugin)(nil)
+var _ sdk.Plugin = (*NotifyPlugin)(nil)
+
 // NotifyPlugin is the camera.ui plugin entrypoint for Notify. It implements
 // sdk.Plugin (the camera lifecycle hooks, all no-ops here — Notify is a
 // PluginRoleHub that owns no cameras) and, from Task 4 on, sdk.

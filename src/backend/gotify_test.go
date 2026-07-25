@@ -14,10 +14,10 @@ import (
 func TestGotifyParseTargetMissingServer(t *testing.T) {
 	g := &gotify{}
 
-	if _, err := g.ParseTarget(map[string]any{"token": "tk_secret"}); err == nil {
+	if _, err := g.ParseTarget(map[string]any{"gotify_token": "tk_secret"}); err == nil {
 		t.Fatalf("ParseTarget with no server: got nil error, want error")
 	}
-	if _, err := g.ParseTarget(map[string]any{"server": "", "token": "tk_secret"}); err == nil {
+	if _, err := g.ParseTarget(map[string]any{"gotify_server": "", "gotify_token": "tk_secret"}); err == nil {
 		t.Fatalf("ParseTarget with empty server: got nil error, want error")
 	}
 }
@@ -25,10 +25,10 @@ func TestGotifyParseTargetMissingServer(t *testing.T) {
 func TestGotifyParseTargetMissingToken(t *testing.T) {
 	g := &gotify{}
 
-	if _, err := g.ParseTarget(map[string]any{"server": "https://gotify.example.com"}); err == nil {
+	if _, err := g.ParseTarget(map[string]any{"gotify_server": "https://gotify.example.com"}); err == nil {
 		t.Fatalf("ParseTarget with no token: got nil error, want error")
 	}
-	if _, err := g.ParseTarget(map[string]any{"server": "https://gotify.example.com", "token": ""}); err == nil {
+	if _, err := g.ParseTarget(map[string]any{"gotify_server": "https://gotify.example.com", "gotify_token": ""}); err == nil {
 		t.Fatalf("ParseTarget with empty token: got nil error, want error")
 	}
 }
@@ -37,8 +37,8 @@ func TestGotifyParseTargetTrimsTrailingSlash(t *testing.T) {
 	g := &gotify{}
 
 	cfg, err := g.ParseTarget(map[string]any{
-		"server": "https://gotify.example.com/",
-		"token":  "tk_secret",
+		"gotify_server": "https://gotify.example.com/",
+		"gotify_token":  "tk_secret",
 	})
 	if err != nil {
 		t.Fatalf("ParseTarget: unexpected error: %v", err)
@@ -71,13 +71,14 @@ type decodedGotifyPayload struct {
 }
 
 func TestGotifySendBasic(t *testing.T) {
-	var gotMethod, gotPath, gotToken string
+	var gotMethod, gotPath, gotRawQuery, gotHeaderToken string
 	var gotBody decodedGotifyPayload
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
-		gotToken = r.URL.Query().Get("token")
+		gotRawQuery = r.URL.RawQuery
+		gotHeaderToken = r.Header.Get("X-Gotify-Key")
 		b, _ := io.ReadAll(r.Body)
 		if err := json.Unmarshal(b, &gotBody); err != nil {
 			t.Fatalf("decode body: %v", err)
@@ -102,8 +103,11 @@ func TestGotifySendBasic(t *testing.T) {
 	if gotPath != "/message" {
 		t.Errorf("path = %q, want /message", gotPath)
 	}
-	if gotToken != "tk_secret" {
-		t.Errorf("token query param = %q, want %q", gotToken, "tk_secret")
+	if gotHeaderToken != "tk_secret" {
+		t.Errorf("X-Gotify-Key header = %q, want %q", gotHeaderToken, "tk_secret")
+	}
+	if strings.Contains(gotRawQuery, "tk_secret") {
+		t.Errorf("request URL query = %q, want it to NOT contain the token", gotRawQuery)
 	}
 	if gotBody.Title != "Motion detected" {
 		t.Errorf("title = %q, want %q", gotBody.Title, "Motion detected")
@@ -326,17 +330,17 @@ func TestGotifySchemaConditions(t *testing.T) {
 		}
 	}
 
-	server, ok := byKey["server"]
+	server, ok := byKey["gotify_server"]
 	if !ok {
-		t.Fatalf("schema missing %q field", "server")
+		t.Fatalf("schema missing %q field", "gotify_server")
 	}
 	if !server.Required {
 		t.Errorf("server Required = false, want true")
 	}
 
-	token, ok := byKey["token"]
+	token, ok := byKey["gotify_token"]
 	if !ok {
-		t.Fatalf("schema missing %q field", "token")
+		t.Fatalf("schema missing %q field", "gotify_token")
 	}
 	if token.Format != sdk.StringFormatPassword {
 		t.Errorf("token Format = %q, want %q", token.Format, sdk.StringFormatPassword)

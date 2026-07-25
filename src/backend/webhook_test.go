@@ -18,7 +18,7 @@ func TestWebhookParseTargetMissingURL(t *testing.T) {
 	if _, err := w.ParseTarget(map[string]any{}); err == nil {
 		t.Fatalf("ParseTarget with no url: got nil error, want error")
 	}
-	if _, err := w.ParseTarget(map[string]any{"url": ""}); err == nil {
+	if _, err := w.ParseTarget(map[string]any{"webhook_url": ""}); err == nil {
 		t.Fatalf("ParseTarget with empty url: got nil error, want error")
 	}
 }
@@ -26,7 +26,7 @@ func TestWebhookParseTargetMissingURL(t *testing.T) {
 func TestWebhookParseTargetDefaultsMethodToPost(t *testing.T) {
 	w := &webhook{}
 
-	cfg, err := w.ParseTarget(map[string]any{"url": "https://example.com/hook"})
+	cfg, err := w.ParseTarget(map[string]any{"webhook_url": "https://example.com/hook"})
 	if err != nil {
 		t.Fatalf("ParseTarget: unexpected error: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestWebhookParseTargetDefaultsMethodToPost(t *testing.T) {
 func TestWebhookParseTargetHonorsMethodOverride(t *testing.T) {
 	w := &webhook{}
 
-	cfg, err := w.ParseTarget(map[string]any{"url": "https://example.com/hook", "method": "PUT"})
+	cfg, err := w.ParseTarget(map[string]any{"webhook_url": "https://example.com/hook", "webhook_method": "PUT"})
 	if err != nil {
 		t.Fatalf("ParseTarget: unexpected error: %v", err)
 	}
@@ -54,8 +54,8 @@ func TestWebhookParseTargetHeaderNameRequiresHeaderValue(t *testing.T) {
 	w := &webhook{}
 
 	if _, err := w.ParseTarget(map[string]any{
-		"url":        "https://example.com/hook",
-		"headerName": "X-Api-Key",
+		"webhook_url":        "https://example.com/hook",
+		"webhook_headerName": "X-Api-Key",
 	}); err == nil {
 		t.Fatalf("ParseTarget with headerName but no headerValue: got nil error, want error")
 	}
@@ -65,8 +65,8 @@ func TestWebhookParseTargetHeaderValueRequiresHeaderName(t *testing.T) {
 	w := &webhook{}
 
 	if _, err := w.ParseTarget(map[string]any{
-		"url":         "https://example.com/hook",
-		"headerValue": "secret",
+		"webhook_url":         "https://example.com/hook",
+		"webhook_headerValue": "secret",
 	}); err == nil {
 		t.Fatalf("ParseTarget with headerValue but no headerName: got nil error, want error")
 	}
@@ -76,9 +76,9 @@ func TestWebhookParseTargetHeaderPairAccepted(t *testing.T) {
 	w := &webhook{}
 
 	cfg, err := w.ParseTarget(map[string]any{
-		"url":         "https://example.com/hook",
-		"headerName":  "X-Api-Key",
-		"headerValue": "secret",
+		"webhook_url":         "https://example.com/hook",
+		"webhook_headerName":  "X-Api-Key",
+		"webhook_headerValue": "secret",
 	})
 	if err != nil {
 		t.Fatalf("ParseTarget: unexpected error: %v", err)
@@ -304,25 +304,25 @@ func TestWebhookSchemaConditions(t *testing.T) {
 		}
 	}
 
-	url, ok := byKey["url"]
+	url, ok := byKey["webhook_url"]
 	if !ok {
-		t.Fatalf("schema missing %q field", "url")
+		t.Fatalf("schema missing %q field", "webhook_url")
 	}
 	if !url.Required {
 		t.Errorf("url Required = false, want true")
 	}
 
-	method, ok := byKey["method"]
+	method, ok := byKey["webhook_method"]
 	if !ok {
-		t.Fatalf("schema missing %q field", "method")
+		t.Fatalf("schema missing %q field", "webhook_method")
 	}
 	if len(method.Enum) != 2 || method.Enum[0] != "POST" || method.Enum[1] != "PUT" {
 		t.Errorf("method Enum = %+v, want [POST PUT]", method.Enum)
 	}
 
-	headerValue, ok := byKey["headerValue"]
+	headerValue, ok := byKey["webhook_headerValue"]
 	if !ok {
-		t.Fatalf("schema missing %q field", "headerValue")
+		t.Fatalf("schema missing %q field", "webhook_headerValue")
 	}
 	if headerValue.Format != sdk.StringFormatPassword {
 		t.Errorf("headerValue Format = %q, want %q", headerValue.Format, sdk.StringFormatPassword)

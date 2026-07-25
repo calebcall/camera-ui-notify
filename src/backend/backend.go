@@ -59,6 +59,17 @@ func Register(b Backend) {
 	registry[id] = b
 }
 
+// unregister removes a backend from the registry by id. It exists solely to
+// let tests undo a Register call so repeated test runs (e.g. `go test
+// -count=2`) don't hit Register's duplicate-id panic; production code has no
+// legitimate reason to deregister a backend; unexported.
+func unregister(id string) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	delete(registry, id)
+}
+
 // Get looks up a registered backend by id.
 func Get(id string) (Backend, bool) {
 	mu.Lock()
