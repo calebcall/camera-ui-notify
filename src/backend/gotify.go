@@ -128,8 +128,8 @@ func (g *gotify) Send(ctx context.Context, cfg map[string]string, notif sdk.Noti
 	}
 
 	payload := gotifyPayload{
-		Title:    notif.Title,
-		Message:  body,
+		Title:   notif.Title,
+		Message: body,
 		// Gotify treats priority 0-3 as "silent" (no system notification, only
 		// an in-app list entry), so mapping Info->0 makes detections appear to
 		// deliver nothing. Map into 4..10 so every severity raises a real
