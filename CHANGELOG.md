@@ -5,6 +5,36 @@ All notable changes to **Notify** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-07-24
+
+### Changed
+
+- **Config-driven single target replaces device registration.** The stock camera.ui UI has no
+  way to *create* a notifier device — `registerDevice` is only ever called by the mobile app's
+  push-registration flow, hardcoded to the official NVR's plugin name, and the generic
+  notification settings panel renders read-only. The plugin's own settings page, however, does
+  render an editable, savable form from any plugin's `StorageSchema`. Notify now holds exactly
+  one target — a selected service (`ntfy`/`gotify`/`webhook`) plus that service's fields — in its
+  own persisted config, set from the plugin's settings page in camera.ui rather than through a
+  device-add flow.
+- **`getDevices` synthesizes the device from config.** Instead of reading a stored device list, it
+  reads the configured service and fields on every call, validates them (`ParseTarget`), and
+  returns a single `sdk.NotifierDevice` (or none, if unconfigured/incomplete). `getDevice` mirrors
+  this for the one synthesized id (`cfg:<service>`).
+- **`registerDevice` / `updateDevice` / `revokeDevice` are now no-ops** (the first returns an
+  error directing users to the plugin's settings page) — targets are configured, not registered.
+  These remain only to satisfy the `Notifier` interface.
+- **`notificationSettings()` returns nothing.** Target configuration now lives on the plugin's
+  config tab; duplicating it in the notification "send test" panel would only confuse.
+
+### Removed
+
+- The device store (`src/store.go`) and its persisted `devices` key — replaced by the
+  `StorageSchema`-based config described above.
+
+Backends (ntfy, Gotify, generic webhook), their config fields, delivery format, and severity
+mapping are unchanged from 0.1.0.
+
 ## [0.1.0] - 2026-07-24
 
 Initial release — a fully-local, multi-backend camera.ui `Notifier` plugin.
@@ -30,4 +60,5 @@ Initial release — a fully-local, multi-backend camera.ui `Notifier` plugin.
 - **Device persistence** — devices are stored as JSON under the plugin's own `DeviceStorage`,
   requiring no external database.
 
+[0.2.0]: https://github.com/calebcall/camera-ui-notify/releases/tag/v0.2.0
 [0.1.0]: https://github.com/calebcall/camera-ui-notify/releases/tag/v0.1.0
