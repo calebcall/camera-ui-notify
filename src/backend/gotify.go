@@ -130,7 +130,11 @@ func (g *gotify) Send(ctx context.Context, cfg map[string]string, notif sdk.Noti
 	payload := gotifyPayload{
 		Title:    notif.Title,
 		Message:  body,
-		Priority: PriorityScale(notif.Severity, 0, 10),
+		// Gotify treats priority 0-3 as "silent" (no system notification, only
+		// an in-app list entry), so mapping Info->0 makes detections appear to
+		// deliver nothing. Map into 4..10 so every severity raises a real
+		// notification: Info=4, Warn=6, Error=8, Critical=10.
+		Priority: PriorityScale(notif.Severity, 4, 10),
 	}
 
 	// Inline notif.Thumbnail bytes aren't supported here: Gotify's

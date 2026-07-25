@@ -115,7 +115,7 @@ func TestGotifySendBasic(t *testing.T) {
 	if gotBody.Message != "Front door camera" {
 		t.Errorf("message = %q, want %q", gotBody.Message, "Front door camera")
 	}
-	if want := PriorityScale(sdk.SeverityInfo, 0, 10); gotBody.Priority != want {
+	if want := PriorityScale(sdk.SeverityInfo, 4, 10); gotBody.Priority != want {
 		t.Errorf("priority = %d, want %d", gotBody.Priority, want)
 	}
 	if gotBody.Extras != nil {
@@ -152,7 +152,7 @@ func TestGotifySendPriorityBySeverity(t *testing.T) {
 		sev  sdk.Severity
 		want int
 	}{
-		{sdk.SeverityInfo, 0},
+		{sdk.SeverityInfo, 4},
 		{sdk.SeverityCritical, 10},
 	}
 
