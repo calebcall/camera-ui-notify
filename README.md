@@ -38,12 +38,24 @@ One plugin, contract `interfaces: [Notifier]`, built around a pluggable-backend 
   validation, and delivery).
 - A package-level registry maps each backend's stable id to its implementation; every backend
   self-registers from its own `init()`.
-- Each registered **device** (`sdk.NotifierDevice`) is one delivery target bound to one backend,
-  holding that backend's validated config in its metadata. Register as many devices as you like,
-  across the same or different backends — each one receives every notification.
-- `sendNotification` dispatches every targeted device to its backend's `Send`, one device at a
-  time (sequentially, not in parallel). A single backend failure is logged and returned to the
-  host, but never aborts delivery to the remaining devices.
+- The plugin holds **one active target** in its own persisted config (`StorageSchema`): which
+  service is selected, plus that service's validated fields. `getDevices` synthesizes a single
+  `sdk.NotifierDevice` from this config on every call — there is no device registry.
+- `sendNotification` dispatches the synthesized device to its backend's `Send`. A backend failure
+  is logged and returned to the host.
+
+### Why config, not device registration
+
+Earlier versions of this plugin modeled targets as registrable `NotifierDevice`s, the way
+camera.ui's own mobile-push notifier does. That model turned out to be unreachable from the stock
+UI: `registerDevice` is only ever called by the camera.ui mobile app's push-registration flow,
+which is hardcoded to the official NVR's plugin name. The generic notification settings panel
+renders `notificationSettings()` read-only — it has no "add a device" affordance for third-party
+plugins. The one part of the stock UI that **does** render an editable, savable form for a
+third-party plugin is its own settings page, which renders whatever `StorageSchema` the plugin
+declares. So Notify now models its target as plugin config instead of a device: you configure it
+once, in the plugin's own settings, and `getDevices` synthesizes the device the host's
+`Notifier` interface expects from that config.
 
 Adding a new backend later is **one new file** — `src/backend/<name>.go` implementing `Backend`
 plus `Register(...)` in its `init()` — and a version bump. No new plugin, no core change, no
@@ -97,20 +109,23 @@ Delivery: `{method} {url}` with `Content-Type: application/json` and (if configu
 header, carrying a JSON body of `{title, subtitle, body, severity, tag, imageUrl, deepLink, data,
 createdAt}`.
 
-## Setting up a device
+## Configuring your target (v1: one active target)
 
-From the camera.ui **notifications/devices** UI:
+There is no "add device" flow. Instead, configure the plugin itself:
 
-1. Add a new notification device and pick a **Service** (`ntfy`, `Gotify`, or `Generic webhook`)
-   from the dropdown built from the registered backends.
-2. Fill in that service's fields (only the selected service's fields are shown — the rest are
-   condition-gated out).
-3. Save. The device is validated (`ParseTarget`) and persisted; notifications from any publisher
-   are now delivered to it until it's deactivated or revoked.
+1. Open the **Notify** plugin's page in camera.ui (Plugins → Notify).
+2. In its settings, pick a **Service** (`ntfy`, `Gotify`, or `Generic webhook`) from the dropdown
+   built from the registered backends.
+3. Fill in that service's fields — only the selected service's fields are shown; the rest are
+   condition-gated out.
+4. Save. The config is validated (`ParseTarget`) the next time a notification is dispatched;
+   `getDevices` then synthesizes one delivery target from it, and notifications from any publisher
+   are delivered there.
 
-You can register multiple devices — e.g. an ntfy topic for yourself and a Gotify server for a
-household — and every active device receives every notification (delivered sequentially, one
-device after another, not in parallel).
+This is a **single, instance-wide target** in v1 — there's no way to register several devices at
+once. Changing the config replaces the previous target rather than adding to it. Delivery for that
+one target is a single request per notification (no fan-out to worry about, since there's only one
+device).
 
 ## Tech stack
 
@@ -118,8 +133,8 @@ device after another, not in parallel).
 - **camera.ui SDK (Go)** for the plugin runtime, the `Notifier` RPC surface, and device storage.
 - Delivery via each backend's plain HTTP API using the Go stdlib `net/http` — no third-party HTTP
   client libraries.
-- Device persistence via the plugin's own `DeviceStorage` (a schema-registered `devices` key
-  holding the device list as JSON) — no SQLite; the device count is tiny.
+- Config persistence via the plugin's own `DeviceStorage`, holding the selected service and its
+  fields as declared by `StorageSchema()` — no SQLite; it's a handful of scalar values.
 
 ## Prerequisites
 
@@ -139,7 +154,7 @@ The install slot is:
 <camera.ui-install>/plugins/@calebcall/camera-ui-notify/
 ```
 
-and the plugin's device data lives under
+and the plugin's config (the selected service and its fields) lives under
 `<camera.ui-install>/volume/plugins/storage/@calebcall/camera-ui-notify/` — reinstalling the code
 does not touch it.
 
