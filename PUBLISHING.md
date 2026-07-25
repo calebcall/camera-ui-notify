@@ -38,7 +38,9 @@ identity is trusted, and npm records a provenance attestation for each package.
 
 ## Cutting a release
 
-1. Bump `version` in `package.json` and add a `CHANGELOG.md` entry.
+1. Bump `version` in `package.json` and add a matching `## [<version>]` entry to
+   `CHANGELOG.md`. **Required** — the workflow fails the release if the changelog
+   has no entry for the version being published.
 2. Commit to `main`.
 3. Tag and push:
    ```bash
