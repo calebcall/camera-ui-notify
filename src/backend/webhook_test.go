@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -94,15 +95,16 @@ func TestWebhookParseTargetHeaderPairAccepted(t *testing.T) {
 // decodedWebhookPayload is a loose structural mirror of what webhook.Send is
 // expected to emit, used only to assert on the JSON body in tests.
 type decodedWebhookPayload struct {
-	Title     string            `json:"title"`
-	Subtitle  string            `json:"subtitle"`
-	Body      string            `json:"body"`
-	Severity  string            `json:"severity"`
-	Tag       string            `json:"tag"`
-	ImageURL  string            `json:"imageUrl"`
-	DeepLink  string            `json:"deepLink"`
-	Data      map[string]string `json:"data"`
-	CreatedAt int64             `json:"createdAt"`
+	Title           string            `json:"title"`
+	Subtitle        string            `json:"subtitle"`
+	Body            string            `json:"body"`
+	Severity        string            `json:"severity"`
+	Tag             string            `json:"tag"`
+	ImageURL        string            `json:"imageUrl"`
+	DeepLink        string            `json:"deepLink"`
+	Data            map[string]string `json:"data"`
+	CreatedAt       int64             `json:"createdAt"`
+	ThumbnailBase64 string            `json:"thumbnailBase64"`
 }
 
 func fixedClock(ts time.Time) func() time.Time {
@@ -177,6 +179,64 @@ func TestWebhookSendDefaultsToPostWithJSONContentType(t *testing.T) {
 	}
 	if want := fixedTS.UnixMilli(); gotBody.CreatedAt != want {
 		t.Errorf("createdAt = %d, want %d", gotBody.CreatedAt, want)
+	}
+}
+
+func TestWebhookSendIncludesThumbnailBase64WhenPresent(t *testing.T) {
+	var gotBody decodedWebhookPayload
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(b, &gotBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	w := newWebhook()
+	w.client = srv.Client()
+	w.now = fixedClock(time.Unix(0, 0))
+
+	cfg := map[string]string{"url": srv.URL, "method": http.MethodPost}
+	thumb := []byte{0xFF, 0xD8, 0xFF, 0xD9}
+	notif := sdk.Notification{Title: "x", Thumbnail: thumb}
+
+	if err := w.Send(nil, cfg, notif); err != nil {
+		t.Fatalf("Send: unexpected error: %v", err)
+	}
+
+	want := base64.StdEncoding.EncodeToString(thumb)
+	if gotBody.ThumbnailBase64 != want {
+		t.Errorf("thumbnailBase64 = %q, want %q", gotBody.ThumbnailBase64, want)
+	}
+}
+
+func TestWebhookSendOmitsThumbnailBase64WhenAbsent(t *testing.T) {
+	var gotRaw map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(b, &gotRaw); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	w := newWebhook()
+	w.client = srv.Client()
+	w.now = fixedClock(time.Unix(0, 0))
+
+	cfg := map[string]string{"url": srv.URL, "method": http.MethodPost}
+	notif := sdk.Notification{Title: "x"}
+
+	if err := w.Send(nil, cfg, notif); err != nil {
+		t.Fatalf("Send: unexpected error: %v", err)
+	}
+
+	if _, ok := gotRaw["thumbnailBase64"]; ok {
+		t.Errorf("thumbnailBase64 present in body, want absent when Thumbnail unset")
 	}
 }
 

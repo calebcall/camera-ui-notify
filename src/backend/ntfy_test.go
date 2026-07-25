@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -238,6 +239,75 @@ func TestNtfySendOptionalHeaders(t *testing.T) {
 	}
 	if gotHeaders.Get("Authorization") != "Bearer tk_secret" {
 		t.Errorf("Authorization header = %q, want %q", gotHeaders.Get("Authorization"), "Bearer tk_secret")
+	}
+}
+
+func TestNtfySendWithThumbnailPublishesFileAttachment(t *testing.T) {
+	var gotBody []byte
+	var gotHeaders http.Header
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		b, _ := io.ReadAll(r.Body)
+		gotBody = b
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := newNtfy()
+	n.client = srv.Client()
+
+	thumb := []byte{0xFF, 0xD8, 0xFF, 0xD9} // minimal JPEG-ish bytes
+	cfg := map[string]string{"server": srv.URL, "topic": "alerts"}
+	notif := sdk.Notification{
+		Title:     "Motion detected",
+		Body:      "Front door camera",
+		Severity:  sdk.SeverityWarn,
+		Thumbnail: thumb,
+		DeepLink:  "https://camera.example.com/cameras/cam-1",
+	}
+
+	if err := n.Send(nil, cfg, notif); err != nil {
+		t.Fatalf("Send: unexpected error: %v", err)
+	}
+
+	if !bytes.Equal(gotBody, thumb) {
+		t.Errorf("request body = %v, want the raw thumbnail bytes %v", gotBody, thumb)
+	}
+	if gotHeaders.Get("Filename") != "snapshot.jpg" {
+		t.Errorf("Filename header = %q, want %q", gotHeaders.Get("Filename"), "snapshot.jpg")
+	}
+	if gotHeaders.Get("Message") != "Front door camera" {
+		t.Errorf("Message header = %q, want %q", gotHeaders.Get("Message"), "Front door camera")
+	}
+	if gotHeaders.Get("Title") != "Motion detected" {
+		t.Errorf("Title header = %q, want %q", gotHeaders.Get("Title"), "Motion detected")
+	}
+	if gotHeaders.Get("Click") != "https://camera.example.com/cameras/cam-1" {
+		t.Errorf("Click header = %q, want %q", gotHeaders.Get("Click"), "https://camera.example.com/cameras/cam-1")
+	}
+}
+
+func TestNtfySendWithThumbnailMessageFallsBackToTitle(t *testing.T) {
+	var gotHeaders http.Header
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := newNtfy()
+	n.client = srv.Client()
+
+	cfg := map[string]string{"server": srv.URL, "topic": "alerts"}
+	notif := sdk.Notification{Title: "Motion detected", Thumbnail: []byte{0x01, 0x02}}
+
+	if err := n.Send(nil, cfg, notif); err != nil {
+		t.Fatalf("Send: unexpected error: %v", err)
+	}
+	if gotHeaders.Get("Message") != "Motion detected" {
+		t.Errorf("Message header = %q, want fallback to title %q", gotHeaders.Get("Message"), "Motion detected")
 	}
 }
 
