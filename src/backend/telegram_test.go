@@ -341,3 +341,18 @@ func TestTelegramSchemaConditions(t *testing.T) {
 		t.Errorf("chat Format = password, want a plain field")
 	}
 }
+
+// TestTelegramSendTransportErrorRedactsToken proves a transport failure does
+// not leak the bot token (which is in the request URL path) into the error.
+func TestTelegramSendTransportErrorRedactsToken(t *testing.T) {
+	tg := newTelegram()
+	tg.baseURL = "http://127.0.0.1:1" // unreachable local addr → connection refused
+	cfg := map[string]string{"token": "123456:SECRETTOKEN", "chat": "42"}
+	err := tg.Send(nil, cfg, sdk.Notification{Title: "x"})
+	if err == nil {
+		t.Fatal("expected a transport error")
+	}
+	if strings.Contains(err.Error(), "SECRETTOKEN") {
+		t.Fatalf("bot token leaked into error: %q", err.Error())
+	}
+}

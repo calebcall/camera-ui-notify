@@ -159,7 +159,7 @@ func (d *discord) Send(ctx context.Context, cfg map[string]string, notif sdk.Not
 		}
 	}
 	if err != nil {
-		return fmt.Errorf("discord: build request: %w", err)
+		return fmt.Errorf("discord: build request: %w", RedactRequestError(err))
 	}
 
 	client := d.client
@@ -169,7 +169,7 @@ func (d *discord) Send(ctx context.Context, cfg map[string]string, notif sdk.Not
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("discord: request failed: %w", err)
+		return fmt.Errorf("discord: request failed: %w", RedactRequestError(err))
 	}
 	defer resp.Body.Close()
 

@@ -162,7 +162,7 @@ func (tg *telegram) Send(ctx context.Context, cfg map[string]string, notif sdk.N
 		req, err = tg.newSendMessageRequest(ctx, baseURL, token, chat, notif)
 	}
 	if err != nil {
-		return fmt.Errorf("telegram: build request: %w", err)
+		return fmt.Errorf("telegram: build request: %w", RedactRequestError(err))
 	}
 
 	client := tg.client
@@ -172,7 +172,7 @@ func (tg *telegram) Send(ctx context.Context, cfg map[string]string, notif sdk.N
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("telegram: request failed: %w", err)
+		return fmt.Errorf("telegram: request failed: %w", RedactRequestError(err))
 	}
 	defer resp.Body.Close()
 

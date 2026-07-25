@@ -277,3 +277,17 @@ func TestDiscordSchemaConditions(t *testing.T) {
 		t.Errorf("webhook = %+v, want Required=true Format=password", webhook)
 	}
 }
+
+// TestDiscordSendTransportErrorRedactsWebhook proves a transport failure does
+// not leak the webhook URL (itself a secret) into the error.
+func TestDiscordSendTransportErrorRedactsWebhook(t *testing.T) {
+	d := newDiscord()
+	cfg := map[string]string{"webhook": "http://127.0.0.1:1/api/webhooks/1/SECRETHOOK"}
+	err := d.Send(nil, cfg, sdk.Notification{Title: "x"})
+	if err == nil {
+		t.Fatal("expected a transport error")
+	}
+	if strings.Contains(err.Error(), "SECRETHOOK") {
+		t.Fatalf("webhook secret leaked into error: %q", err.Error())
+	}
+}
