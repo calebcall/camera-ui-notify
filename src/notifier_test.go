@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -366,6 +369,106 @@ func TestSendNotification_SkipsUnknownID(t *testing.T) {
 	}
 	if got := fb.callCount(); got != 0 {
 		t.Fatalf("Send call count = %d, want 0 for an unknown device id", got)
+	}
+}
+
+// withImageFetchServer starts an httptest server with handler, points the
+// package-level imageFetchClient at it, and returns the server plus a cleanup
+// that restores the original client. Used by the ImageURL-resolution tests.
+func withImageFetchServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	old := imageFetchClient
+	imageFetchClient = srv.Client()
+	t.Cleanup(func() {
+		imageFetchClient = old
+		srv.Close()
+	})
+	return srv
+}
+
+func TestSendNotification_FetchesImageURLIntoThumbnail(t *testing.T) {
+	fb := registerFakeBackend()
+
+	imgBytes := []byte{0xff, 0xd8, 0xff, 0xe0, 0x01, 0x02, 0x03}
+	var gotPath string
+	srv := withImageFetchServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(imgBytes)
+	})
+
+	p := newTestPlugin(map[string]any{"service": "fake", "topic": "t"})
+	n := &sdk.Notification{Title: "hi", ImageURL: srv.URL + "/snap.jpg"}
+	if err := p.SendNotification([]string{"cfg:fake"}, n); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+
+	if gotPath != "/snap.jpg" {
+		t.Fatalf("fetched path = %q, want /snap.jpg", gotPath)
+	}
+	fb.mu.Lock()
+	got := fb.calls[0].n
+	fb.mu.Unlock()
+	if !bytes.Equal(got.Thumbnail, imgBytes) {
+		t.Fatalf("dispatched Thumbnail = %v, want fetched bytes %v", got.Thumbnail, imgBytes)
+	}
+	if len(n.Thumbnail) != 0 {
+		t.Fatalf("caller's *n.Thumbnail mutated: got %d bytes, want 0", len(n.Thumbnail))
+	}
+}
+
+func TestSendNotification_ExistingThumbnailNotOverwrittenByImageURL(t *testing.T) {
+	fb := registerFakeBackend()
+
+	var hits int
+	srv := withImageFetchServer(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte("SHOULD-NOT-BE-FETCHED"))
+	})
+
+	inline := []byte("inline-bytes")
+	p := newTestPlugin(map[string]any{"service": "fake", "topic": "t"})
+	n := &sdk.Notification{Title: "hi", Thumbnail: inline, ImageURL: srv.URL + "/snap.jpg"}
+	if err := p.SendNotification([]string{"cfg:fake"}, n); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+
+	if hits != 0 {
+		t.Fatalf("fetched ImageURL %d times, want 0 when an inline Thumbnail is present", hits)
+	}
+	fb.mu.Lock()
+	got := fb.calls[0].n
+	fb.mu.Unlock()
+	if !bytes.Equal(got.Thumbnail, inline) {
+		t.Fatalf("Thumbnail = %q, want unchanged inline bytes %q", got.Thumbnail, inline)
+	}
+}
+
+func TestSendNotification_ImageURLFetchFailureDegradesGracefully(t *testing.T) {
+	fb := registerFakeBackend()
+
+	srv := withImageFetchServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	})
+
+	p := newTestPlugin(map[string]any{"service": "fake", "topic": "t"})
+	n := &sdk.Notification{Title: "hi", ImageURL: srv.URL + "/snap.jpg"}
+	if err := p.SendNotification([]string{"cfg:fake"}, n); err != nil {
+		t.Fatalf("SendNotification must not error on image-fetch failure: %v", err)
+	}
+
+	if got := fb.callCount(); got != 1 {
+		t.Fatalf("Send call count = %d, want 1 (delivery proceeds despite fetch failure)", got)
+	}
+	fb.mu.Lock()
+	got := fb.calls[0].n
+	fb.mu.Unlock()
+	if len(got.Thumbnail) != 0 {
+		t.Fatalf("Thumbnail = %d bytes, want 0 after a failed fetch", len(got.Thumbnail))
+	}
+	if got.ImageURL != srv.URL+"/snap.jpg" {
+		t.Fatalf("ImageURL = %q, want left intact so URL-capable backends still render it", got.ImageURL)
 	}
 }
 
