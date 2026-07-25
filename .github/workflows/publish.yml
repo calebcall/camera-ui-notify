@@ -16,6 +16,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: build + cross-compile + bundle, but do NOT publish to npm.'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -41,6 +47,7 @@ jobs:
         run: npm install -g npm@latest
 
       - name: Verify tag matches package.json version
+        if: github.event_name == 'push'
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           PKG="$(node -p "require('./package.json').version")"
@@ -56,9 +63,18 @@ jobs:
       - name: Build bundle (cross-compiles all platform targets)
         run: npm run bundle
 
+      # A manual dry run stops here — the build + cross-compile + bundle having
+      # succeeded is the point of the dry run; nothing is published.
+      - name: Dry run — skipping publish
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          echo "Dry run: build, cross-compile, and bundle succeeded. Not publishing."
+
       # cui runs `npm publish` for the main package + each platform package.
       # With id-token: write + npm >= 11.5 + Trusted Publishers configured, each
       # publish authenticates via OIDC (no token) and emits a provenance
-      # attestation. `--yes` skips the interactive confirmation.
+      # attestation. `--yes` skips the interactive confirmation. Runs on a tag
+      # push, or a manual run with dry_run unchecked.
       - name: Publish to npm (Trusted Publishing / OIDC)
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run) }}
         run: npx --no-install cui publish --latest --yes

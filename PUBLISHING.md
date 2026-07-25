@@ -48,6 +48,15 @@ identity is trusted, and npm records a provenance attestation for each package.
 4. The `publish` workflow builds all platforms and publishes them to npm under
    `latest`. (It fails fast if the tag doesn't match `package.json` version.)
 
+## Dry run (manual)
+
+To exercise the build/cross-compile/bundle path **without publishing** (e.g. to
+validate the pipeline before the trusted publishers are configured, or before
+cutting a real release): GitHub → **Actions** → **publish** → **Run workflow**.
+The `dry_run` box is **checked by default**, so a manual run builds everything
+and stops before `npm publish`. Uncheck it to publish `package.json`'s current
+version manually via the same OIDC path (no tag required).
+
 ## Notes
 
 - The workflow upgrades npm to the latest before publishing — Trusted Publishing
