@@ -20,10 +20,10 @@ type fakeSendCall struct {
 }
 
 // fakeBackend is a minimal backend.Backend used to exercise notifier.go's
-// dispatch logic without depending on any real delivery backend (those land
-// in Tasks 5-7). It self-registers once under id "fake" via
-// registerFakeBackend, and its mutable test knobs (failTopics) are guarded
-// by mu so tests can run sequentially against the single shared instance.
+// dispatch logic without depending on any real delivery backend. It
+// self-registers once under id "fake" via registerFakeBackend, and its
+// mutable test knobs (failTopics) are guarded by mu so tests can run
+// sequentially against the single shared instance.
 type fakeBackend struct {
 	mu         sync.Mutex
 	calls      []fakeSendCall
@@ -84,7 +84,8 @@ var (
 // registerFakeBackend registers the single shared fakeBackend instance with
 // the package-level backend registry exactly once (backend.Register panics
 // on a duplicate id, and every test in this file shares one process/test
-// binary), then resets its recorded state for the calling test.
+// binary, including repeated iterations under `go test -count=2`), then
+// resets its recorded state for the calling test.
 func registerFakeBackend() *fakeBackend {
 	registerFakeBackendMu.Do(func() {
 		sharedFakeBackend = &fakeBackend{}
@@ -94,220 +95,258 @@ func registerFakeBackend() *fakeBackend {
 	return sharedFakeBackend
 }
 
-// newTestPlugin builds a NotifyPlugin wired to an in-memory device store, so
-// tests never touch a real *sdk.DeviceStorage.
-func newTestPlugin() *NotifyPlugin {
+// newTestPlugin builds a NotifyPlugin backed by an in-memory
+// *sdk.DeviceStorage seeded with values, so tests never touch a real
+// persistence layer. DeviceStorage.Values is an exported field and
+// GetValue reads directly from it when no schema is registered (schema is
+// only consulted for OnGet/DefaultValue), so a bare struct literal is a
+// faithful stand-in for the host-constructed storage.
+func newTestPlugin(values map[string]any) *NotifyPlugin {
+	if values == nil {
+		values = map[string]any{}
+	}
 	return &NotifyPlugin{
-		BasePlugin: sdk.NewBasePlugin(&sdk.Logger{}, nil, nil),
-		store:      newDeviceStore(newFakeStorage()),
+		BasePlugin: sdk.NewBasePlugin(&sdk.Logger{}, nil, &sdk.DeviceStorage{Values: values}),
 	}
 }
 
-func TestRegisterDevice_Valid(t *testing.T) {
-	registerFakeBackend()
-	p := newTestPlugin()
-
-	dev, err := p.RegisterDevice("u1", map[string]any{"service": "fake", "topic": "t"})
-	if err != nil {
-		t.Fatalf("RegisterDevice: %v", err)
-	}
-	if dev == nil {
-		t.Fatalf("RegisterDevice: got nil device")
-	}
-	if dev.OwnerUserID != "u1" {
-		t.Fatalf("OwnerUserID = %q, want u1", dev.OwnerUserID)
-	}
-	if !dev.Active {
-		t.Fatalf("expected new device to be Active")
-	}
-	if dev.ID == "" {
-		t.Fatalf("expected non-empty ID")
-	}
-	if svc, ok := dev.Metadata["service"].(string); !ok || svc != "fake" {
-		t.Fatalf("Metadata[service] = %#v, want string \"fake\"", dev.Metadata["service"])
-	}
-	if topic, ok := dev.Metadata["topic"].(string); !ok || topic != "t" {
-		t.Fatalf("Metadata[topic] = %#v, want string \"t\"", dev.Metadata["topic"])
-	}
-
-	stored, ok := p.store.Get(dev.ID)
-	if !ok {
-		t.Fatalf("expected device persisted in store")
-	}
-	if stored.Name != "fake" {
-		t.Fatalf("Name = %q, want fallback to service %q", stored.Name, "fake")
-	}
-}
-
-func TestRegisterDevice_UnknownService(t *testing.T) {
-	registerFakeBackend()
-	p := newTestPlugin()
-
-	_, err := p.RegisterDevice("u1", map[string]any{"service": "not-a-real-service", "topic": "t"})
-	if err == nil {
-		t.Fatalf("expected error for unknown service")
-	}
-}
-
-func TestRegisterDevice_MissingRequiredField(t *testing.T) {
-	registerFakeBackend()
-	p := newTestPlugin()
-
-	_, err := p.RegisterDevice("u1", map[string]any{"service": "fake"})
-	if err == nil {
-		t.Fatalf("expected error for missing topic")
-	}
-}
-
-func TestGetDevices_OwnerFilter(t *testing.T) {
-	registerFakeBackend()
-	p := newTestPlugin()
-
-	if _, err := p.RegisterDevice("u1", map[string]any{"service": "fake", "topic": "t1"}); err != nil {
-		t.Fatalf("RegisterDevice u1: %v", err)
-	}
+func TestGetDevices_Unconfigured(t *testing.T) {
+	p := newTestPlugin(nil)
 
 	got, err := p.GetDevices([]string{"u1"})
 	if err != nil {
-		t.Fatalf("GetDevices(u1): %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("GetDevices(u1) = %d devices, want 1", len(got))
-	}
-
-	got, err = p.GetDevices([]string{"u2"})
-	if err != nil {
-		t.Fatalf("GetDevices(u2): %v", err)
+		t.Fatalf("GetDevices: %v", err)
 	}
 	if len(got) != 0 {
-		t.Fatalf("GetDevices(u2) = %d devices, want 0", len(got))
+		t.Fatalf("GetDevices(unconfigured) = %d devices, want 0", len(got))
 	}
 }
 
-func TestUpdateDevice_ActiveToggle(t *testing.T) {
-	registerFakeBackend()
-	p := newTestPlugin()
+func TestGetDevices_UnknownService(t *testing.T) {
+	p := newTestPlugin(map[string]any{"service": "not-a-real-service"})
 
-	dev, err := p.RegisterDevice("u1", map[string]any{"service": "fake", "topic": "t"})
+	got, err := p.GetDevices([]string{"u1"})
 	if err != nil {
-		t.Fatalf("RegisterDevice: %v", err)
+		t.Fatalf("GetDevices: %v", err)
 	}
-
-	updated, err := p.UpdateDevice(dev.ID, map[string]any{"active": false})
-	if err != nil {
-		t.Fatalf("UpdateDevice: %v", err)
-	}
-	if updated == nil {
-		t.Fatalf("UpdateDevice: got nil")
-	}
-	if updated.Active {
-		t.Fatalf("expected Active=false after update")
-	}
-
-	stored, ok := p.store.Get(dev.ID)
-	if !ok {
-		t.Fatalf("expected device still stored")
-	}
-	if stored.Active {
-		t.Fatalf("expected persisted Active=false")
+	if len(got) != 0 {
+		t.Fatalf("GetDevices(unknown service) = %d devices, want 0", len(got))
 	}
 }
 
-func TestUpdateDevice_UnknownID(t *testing.T) {
-	registerFakeBackend()
-	p := newTestPlugin()
+func TestGetDevices_ConfiguredNtfy(t *testing.T) {
+	p := newTestPlugin(map[string]any{
+		"service":     "ntfy",
+		"ntfy_server": "https://ntfy.example.com",
+		"ntfy_topic":  "alerts",
+	})
 
-	updated, err := p.UpdateDevice("nope", map[string]any{"active": false})
+	got, err := p.GetDevices([]string{"u1", "u2"})
 	if err != nil {
-		t.Fatalf("UpdateDevice: %v", err)
+		t.Fatalf("GetDevices: %v", err)
 	}
-	if updated != nil {
-		t.Fatalf("UpdateDevice(unknown) = %+v, want nil", updated)
+	if len(got) != 1 {
+		t.Fatalf("GetDevices(configured ntfy) = %d devices, want 1", len(got))
+	}
+
+	dev := got[0]
+	if dev.ID != "cfg:ntfy" {
+		t.Fatalf("ID = %q, want %q", dev.ID, "cfg:ntfy")
+	}
+	if dev.OwnerUserID != "u1" {
+		t.Fatalf("OwnerUserID = %q, want ownerUserIDs[0] = %q", dev.OwnerUserID, "u1")
+	}
+	if !dev.Active {
+		t.Fatalf("expected synthesized device to be Active")
+	}
+	if svc, ok := dev.Metadata["service"].(string); !ok || svc != "ntfy" {
+		t.Fatalf("Metadata[service] = %#v, want string \"ntfy\"", dev.Metadata["service"])
+	}
+	if server, ok := dev.Metadata["server"].(string); !ok || server != "https://ntfy.example.com" {
+		t.Fatalf("Metadata[server] = %#v, want string \"https://ntfy.example.com\"", dev.Metadata["server"])
+	}
+	if topic, ok := dev.Metadata["topic"].(string); !ok || topic != "alerts" {
+		t.Fatalf("Metadata[topic] = %#v, want string \"alerts\"", dev.Metadata["topic"])
 	}
 }
 
-func TestRevokeDevice(t *testing.T) {
-	registerFakeBackend()
-	p := newTestPlugin()
+func TestGetDevices_IncompleteConfigReturnsEmpty(t *testing.T) {
+	// service is set but the required ntfy_topic field is missing, so
+	// ntfy.ParseTarget errors — that must be swallowed as "not configured
+	// yet", not surfaced as an error.
+	p := newTestPlugin(map[string]any{"service": "ntfy"})
 
-	dev, err := p.RegisterDevice("u1", map[string]any{"service": "fake", "topic": "t"})
+	got, err := p.GetDevices([]string{"u1"})
 	if err != nil {
-		t.Fatalf("RegisterDevice: %v", err)
+		t.Fatalf("GetDevices: unexpected error %v", err)
 	}
-
-	if err := p.RevokeDevice(dev.ID); err != nil {
-		t.Fatalf("RevokeDevice: %v", err)
+	if len(got) != 0 {
+		t.Fatalf("GetDevices(incomplete config) = %d devices, want 0", len(got))
 	}
+}
 
-	if _, ok := p.store.Get(dev.ID); ok {
-		t.Fatalf("expected device removed after RevokeDevice")
+func TestGetDevices_NoOwnerUserIDs(t *testing.T) {
+	p := newTestPlugin(map[string]any{
+		"service":    "ntfy",
+		"ntfy_topic": "alerts",
+	})
+
+	got, err := p.GetDevices(nil)
+	if err != nil {
+		t.Fatalf("GetDevices: %v", err)
 	}
+	if len(got) != 1 {
+		t.Fatalf("GetDevices(nil owners) = %d devices, want 1", len(got))
+	}
+	if got[0].OwnerUserID != "" {
+		t.Fatalf("OwnerUserID = %q, want empty when ownerUserIDs is empty", got[0].OwnerUserID)
+	}
+}
 
-	got, err := p.GetDevice(dev.ID)
+func TestGetDevice(t *testing.T) {
+	p := newTestPlugin(map[string]any{
+		"service":    "ntfy",
+		"ntfy_topic": "alerts",
+	})
+
+	dev, err := p.GetDevice("cfg:ntfy")
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
-	if got != nil {
-		t.Fatalf("GetDevice(revoked) = %+v, want nil", got)
+	if dev == nil {
+		t.Fatalf("GetDevice(cfg:ntfy) = nil, want the synthesized device")
+	}
+	if dev.ID != "cfg:ntfy" {
+		t.Fatalf("ID = %q, want %q", dev.ID, "cfg:ntfy")
+	}
+
+	dev, err = p.GetDevice("other")
+	if err != nil {
+		t.Fatalf("GetDevice: %v", err)
+	}
+	if dev != nil {
+		t.Fatalf("GetDevice(other) = %+v, want nil", dev)
+	}
+}
+
+func TestSendNotification_DispatchesToConfiguredBackend(t *testing.T) {
+	fb := registerFakeBackend()
+	p := newTestPlugin(map[string]any{
+		"service": "fake",
+		"topic":   "sometopic",
+	})
+
+	n := &sdk.Notification{Title: "hello", Body: "world"}
+	if err := p.SendNotification([]string{"cfg:fake"}, n); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+	if got := fb.callCount(); got != 1 {
+		t.Fatalf("Send call count = %d, want 1", got)
 	}
 }
 
 func TestSendNotification_PartialFailureDoesNotAbort(t *testing.T) {
 	fb := registerFakeBackend()
-	p := newTestPlugin()
-
-	okDev, err := p.RegisterDevice("u1", map[string]any{"service": "fake", "topic": "ok-topic"})
-	if err != nil {
-		t.Fatalf("RegisterDevice ok: %v", err)
-	}
-	failDev, err := p.RegisterDevice("u1", map[string]any{"service": "fake", "topic": "fail-topic"})
-	if err != nil {
-		t.Fatalf("RegisterDevice fail: %v", err)
-	}
 	fb.failTopics["fail-topic"] = true
+	p := newTestPlugin(map[string]any{
+		"service": "fake",
+		"topic":   "fail-topic",
+	})
 
 	n := &sdk.Notification{Title: "hello", Body: "world"}
-	err = p.SendNotification([]string{okDev.ID, failDev.ID}, n)
+	err := p.SendNotification([]string{"cfg:fake", "does-not-exist"}, n)
 	if err == nil {
 		t.Fatalf("expected joined error from the failing device")
 	}
 	if !strings.Contains(err.Error(), "fail-topic") {
 		t.Fatalf("error %v does not reference the failing device/topic", err)
 	}
-	if got := fb.callCount(); got != 2 {
-		t.Fatalf("Send call count = %d, want 2 (both devices dispatched)", got)
+	if got := fb.callCount(); got != 1 {
+		t.Fatalf("Send call count = %d, want 1 (the unknown id is skipped, not dispatched)", got)
 	}
 }
 
-func TestSendNotification_SkipsInactiveAndUnknown(t *testing.T) {
+func TestSendNotification_SkipsUnknownID(t *testing.T) {
 	fb := registerFakeBackend()
-	p := newTestPlugin()
-
-	dev, err := p.RegisterDevice("u1", map[string]any{"service": "fake", "topic": "t"})
-	if err != nil {
-		t.Fatalf("RegisterDevice: %v", err)
-	}
-	if _, err := p.UpdateDevice(dev.ID, map[string]any{"active": false}); err != nil {
-		t.Fatalf("UpdateDevice: %v", err)
-	}
+	p := newTestPlugin(map[string]any{
+		"service": "fake",
+		"topic":   "t",
+	})
 
 	n := &sdk.Notification{Title: "hello"}
-	if err := p.SendNotification([]string{dev.ID, "does-not-exist"}, n); err != nil {
+	if err := p.SendNotification([]string{"does-not-exist"}, n); err != nil {
 		t.Fatalf("SendNotification: unexpected error %v", err)
 	}
 	if got := fb.callCount(); got != 0 {
-		t.Fatalf("Send call count = %d, want 0 for inactive/unknown devices", got)
+		t.Fatalf("Send call count = %d, want 0 for an unknown device id", got)
 	}
 }
 
-func TestNotificationSettings(t *testing.T) {
-	registerFakeBackend()
-	p := newTestPlugin()
+func TestRegisterDevice_ReturnsError(t *testing.T) {
+	p := newTestPlugin(nil)
+
+	dev, err := p.RegisterDevice("u1", map[string]any{"service": "ntfy", "ntfy_topic": "t"})
+	if err == nil {
+		t.Fatalf("expected RegisterDevice to error (targets are config-driven, not registered)")
+	}
+	if dev != nil {
+		t.Fatalf("RegisterDevice error path = %+v, want nil device", dev)
+	}
+}
+
+func TestUpdateDevice_Benign(t *testing.T) {
+	p := newTestPlugin(map[string]any{
+		"service":    "ntfy",
+		"ntfy_topic": "alerts",
+	})
+
+	dev, err := p.UpdateDevice("cfg:ntfy", map[string]any{"active": false})
+	if err != nil {
+		t.Fatalf("UpdateDevice: unexpected error %v", err)
+	}
+	if dev != nil {
+		t.Fatalf("UpdateDevice = %+v, want nil (no-op)", dev)
+	}
+}
+
+func TestRevokeDevice_Benign(t *testing.T) {
+	p := newTestPlugin(map[string]any{
+		"service":    "ntfy",
+		"ntfy_topic": "alerts",
+	})
+
+	if err := p.RevokeDevice("cfg:ntfy"); err != nil {
+		t.Fatalf("RevokeDevice: unexpected error %v", err)
+	}
+
+	// Revoking is a no-op: the device is still synthesized from config
+	// afterwards.
+	dev, err := p.GetDevice("cfg:ntfy")
+	if err != nil {
+		t.Fatalf("GetDevice: %v", err)
+	}
+	if dev == nil {
+		t.Fatalf("GetDevice(cfg:ntfy) after RevokeDevice = nil, want still-configured device")
+	}
+}
+
+func TestNotificationSettings_ReturnsNil(t *testing.T) {
+	p := newTestPlugin(nil)
 
 	schemas, err := p.NotificationSettings()
 	if err != nil {
-		t.Fatalf("NotificationSettings: %v", err)
+		t.Fatalf("NotificationSettings: unexpected error %v", err)
 	}
+	if schemas != nil {
+		t.Fatalf("NotificationSettings = %+v, want nil", schemas)
+	}
+}
+
+func TestStorageSchema(t *testing.T) {
+	registerFakeBackend()
+	p := newTestPlugin(nil)
+
+	schemas := p.StorageSchema()
 
 	var serviceField *sdk.JsonSchema
 	for i := range schemas {
@@ -317,7 +356,13 @@ func TestNotificationSettings(t *testing.T) {
 		}
 	}
 	if serviceField == nil {
-		t.Fatalf("expected a %q field in schema", "service")
+		t.Fatalf("expected a %q field in StorageSchema", "service")
+	}
+	if serviceField.Store == nil || !*serviceField.Store {
+		t.Fatalf("service field Store = %v, want true", serviceField.Store)
+	}
+	if serviceField.Required {
+		t.Fatalf("service field must not be Required (empty = not configured yet)")
 	}
 	found := false
 	for _, v := range serviceField.Enum {
@@ -328,17 +373,36 @@ func TestNotificationSettings(t *testing.T) {
 	if !found {
 		t.Fatalf("service enum %v does not contain %q", serviceField.Enum, "fake")
 	}
-	if !serviceField.Required {
-		t.Fatalf("expected service field to be Required")
-	}
 
-	foundTopic := false
-	for _, s := range schemas {
-		if s.Key == "topic" {
-			foundTopic = true
+	var topicField *sdk.JsonSchema
+	for i := range schemas {
+		if schemas[i].Key == "ntfy_topic" {
+			topicField = &schemas[i]
+			break
 		}
 	}
-	if !foundTopic {
-		t.Fatalf("expected fake backend's %q schema field to be included", "topic")
+	if topicField == nil {
+		t.Fatalf("expected ntfy backend's %q field to be flattened into StorageSchema", "ntfy_topic")
+	}
+	if topicField.Store == nil || !*topicField.Store {
+		t.Fatalf("ntfy_topic field Store = %v, want true", topicField.Store)
+	}
+}
+
+func TestStorageSchema_DoesNotMutateBackendSchema(t *testing.T) {
+	// Calling StorageSchema() must not leave Store set on the backend's own
+	// Schema() return value — each call flattens a copy.
+	b, ok := backend.Get("ntfy")
+	if !ok {
+		t.Fatalf("ntfy backend not registered")
+	}
+
+	p := newTestPlugin(nil)
+	p.StorageSchema()
+
+	for _, field := range b.Schema() {
+		if field.Store != nil {
+			t.Fatalf("backend.Schema()[%q].Store = %v after StorageSchema(), want nil (unmutated)", field.Key, *field.Store)
+		}
 	}
 }

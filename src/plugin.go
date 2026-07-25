@@ -2,15 +2,9 @@ package main
 
 import (
 	sdk "github.com/cameraui/sdk/go"
-)
 
-// devicesStorageKey is the single DeviceStorage key this plugin persists
-// to: the full set of registered NotifierDevice records, JSON-marshaled by
-// the device store (see Task 3's src/store.go). Declared here, in
-// StorageSchema, because sdk.DeviceStorage.SetValue silently no-ops for any
-// key with no declared schema (Global Constraints) — every later task that
-// writes to this key depends on it being declared exactly once, here.
-const devicesStorageKey = "devices"
+	"github.com/calebcall/camera-ui-notify/src/backend"
+)
 
 // Compile-time conformance guards. NotifyPlugin must satisfy both sdk.Plugin
 // (the camera lifecycle hooks) and sdk.NotifierInterface (the Notifier RPC
@@ -22,19 +16,18 @@ var _ sdk.Plugin = (*NotifyPlugin)(nil)
 
 // NotifyPlugin is the camera.ui plugin entrypoint for Notify. It implements
 // sdk.Plugin (the camera lifecycle hooks, all no-ops here — Notify is a
-// PluginRoleHub that owns no cameras) and, from Task 4 on, sdk.
-// NotifierInterface (GetDevices/RegisterDevice/SendNotification/... —
-// contract.ts declares PluginInterface.Notifier). This task only lays down
-// the struct, construction, and the two SDK-required allow-lists
-// (RPCMethods, StorageSchema); the Notifier methods themselves are Task 4.
+// PluginRoleHub that owns no cameras) and sdk.NotifierInterface
+// (GetDevices/RegisterDevice/SendNotification/... — contract.ts declares
+// PluginInterface.Notifier).
+//
+// R1 pivot: the stock camera.ui UI has no way to register a notifier
+// device (see docs/superpowers/plans/2026-07-24-notify-config-targets.md),
+// so this plugin no longer maintains a device registry. Instead it holds a
+// single config-driven target in its own plugin storage (StorageSchema,
+// below) and src/notifier.go synthesizes the one NotifierDevice from that
+// config on every read.
 type NotifyPlugin struct {
 	sdk.BasePlugin
-
-	// store is the persisted registry of this plugin's NotifierDevice
-	// records (Task 3's src/store.go), backed by BasePlugin.Storage under
-	// devicesStorageKey. Task 4's Notifier RPC methods (src/notifier.go)
-	// read and write through it exclusively.
-	store *deviceStore
 }
 
 // NewPlugin constructs the plugin. Signature is fixed by sdk.Run's
@@ -42,7 +35,6 @@ type NotifyPlugin struct {
 func NewPlugin(logger *sdk.Logger, api *sdk.PluginAPI, storage *sdk.DeviceStorage) sdk.Plugin {
 	return &NotifyPlugin{
 		BasePlugin: sdk.NewBasePlugin(logger, api, storage),
-		store:      newDeviceStore(storage),
 	}
 }
 
@@ -80,21 +72,49 @@ func (p *NotifyPlugin) RPCMethods() []string {
 	}
 }
 
-// StorageSchema declares this plugin's persisted storage keys. Required per
-// Global Constraints: sdk.DeviceStorage.SetValue silently no-ops for a key
-// with no declared schema, so devicesStorageKey must be declared before
-// Task 3's device store ever writes to it. Hidden because it's an
-// internal, plugin-managed blob (the JSON-encoded []sdk.NotifierDevice
-// slice), not a user-facing settings field.
+// StorageSchema declares this plugin's persisted config: which delivery
+// service is active plus that service's own settings. It is the plugin's
+// config-tab form (views/Plugin.vue renders any StorageSchema as an
+// editable+savable form via CuiSchema/setConfig) — this is what R1 replaced
+// the old device registry with, since the stock UI never gave users a way
+// to register a NotifierDevice directly.
+//
+// The "service" field lists every registered backend.All() id and is not
+// Required: an empty value simply means "not configured yet" (getDevices
+// then returns no devices rather than erroring). Every backend's own
+// Schema() fields are flattened in below it — those fields are already
+// namespaced (ntfy_server, gotify_token, ...) and Condition-gated on
+// "service" (see e.g. src/backend/ntfy.go), so the plugin page only shows
+// the fields for whichever service is currently selected. Each flattened
+// field gets Store set on a copy (never mutating the backend's own
+// returned slice/elements) since, unlike a device-registration payload,
+// this config is now persisted directly in plugin storage.
 func (p *NotifyPlugin) StorageSchema() []sdk.JsonSchema {
 	storeTrue := true
-	return []sdk.JsonSchema{
+
+	backends := backend.All()
+	ids := make([]string, 0, len(backends))
+	for _, b := range backends {
+		ids = append(ids, b.ID())
+	}
+
+	fields := []sdk.JsonSchema{
 		{
-			Type:   sdk.JsonSchemaTypeString,
-			Key:    devicesStorageKey,
-			Title:  "Devices",
-			Hidden: true,
-			Store:  &storeTrue,
+			Type:        sdk.JsonSchemaTypeString,
+			Key:         "service",
+			Title:       "Service",
+			Description: "The notification delivery service to send to.",
+			Enum:        ids,
+			Store:       &storeTrue,
 		},
 	}
+
+	for _, b := range backends {
+		for _, field := range b.Schema() {
+			field.Store = &storeTrue
+			fields = append(fields, field)
+		}
+	}
+
+	return fields
 }
