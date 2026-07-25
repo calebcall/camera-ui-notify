@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -103,7 +104,14 @@ func (n *ntfy) ParseTarget(input map[string]any) (map[string]string, error) {
 	return cfg, nil
 }
 
-// Send delivers a single notification via an ntfy publish request.
+// Send delivers a single notification via an ntfy publish request. When an
+// inline Thumbnail is present, it is published as a file attachment (the
+// request body is the raw JPEG bytes) per
+// https://docs.ntfy.sh/publish/#attach-local-file — ntfy then requires the
+// notification text to travel in the Message header rather than the body,
+// since the body is the file. Otherwise the notification text is the
+// request body, as before, and ImageURL (if any) is passed through as a
+// remote Attach/Icon URL.
 func (n *ntfy) Send(ctx context.Context, cfg map[string]string, notif sdk.Notification) error {
 	server := cfg["server"]
 	topic := cfg["topic"]
@@ -118,7 +126,14 @@ func (n *ntfy) Send(ctx context.Context, cfg map[string]string, notif sdk.Notifi
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
+
+	var req *http.Request
+	var err error
+	if len(notif.Thumbnail) > 0 {
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(notif.Thumbnail))
+	} else {
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
+	}
 	if err != nil {
 		return fmt.Errorf("ntfy: build request: %w", err)
 	}
@@ -128,7 +143,10 @@ func (n *ntfy) Send(ctx context.Context, cfg map[string]string, notif sdk.Notifi
 	if notif.DeepLink != "" {
 		req.Header.Set("Click", notif.DeepLink)
 	}
-	if notif.ImageURL != "" {
+	if len(notif.Thumbnail) > 0 {
+		req.Header.Set("Filename", "snapshot.jpg")
+		req.Header.Set("Message", body)
+	} else if notif.ImageURL != "" {
 		req.Header.Set("Attach", notif.ImageURL)
 		req.Header.Set("Icon", notif.ImageURL)
 	}

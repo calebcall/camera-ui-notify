@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	sdk "github.com/cameraui/sdk/go"
 
@@ -127,6 +128,20 @@ func (p *NotifyPlugin) UpdateDevice(deviceID string, patch map[string]any) (*sdk
 func (p *NotifyPlugin) SendNotification(deviceIDs []string, n *sdk.Notification) error {
 	var errs []error
 
+	// base_url is plugin-level config (not per-backend), so it's read once
+	// here rather than threaded into each backend's cfg map. When set, and
+	// the notification's DeepLink is router-relative (as published by
+	// camera.ui itself), dispatch a copy with an absolute DeepLink so
+	// backends whose tap-through target requires a fully-qualified URL
+	// (e.g. ntfy's Click header) work correctly. The caller's *n is never
+	// mutated: every device sees either the original notification or an
+	// independent copy.
+	toSend := *n
+	baseURL, _ := p.Storage.GetValue("base_url", "").(string)
+	if baseURL != "" && strings.HasPrefix(n.DeepLink, "/") {
+		toSend.DeepLink = strings.TrimRight(baseURL, "/") + n.DeepLink
+	}
+
 	for _, id := range deviceIDs {
 		dev, err := p.GetDevice(id)
 		if err != nil || dev == nil || !dev.Active {
@@ -152,7 +167,7 @@ func (p *NotifyPlugin) SendNotification(deviceIDs []string, n *sdk.Notification)
 			}
 		}
 
-		if err := b.Send(context.Background(), cfg, *n); err != nil {
+		if err := b.Send(context.Background(), cfg, toSend); err != nil {
 			wrapped := fmt.Errorf("device %s (%s): %w", id, service, err)
 			if p.Logger != nil {
 				p.Logger.Error(fmt.Sprintf("notify: send failed: %v", wrapped))

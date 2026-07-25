@@ -107,6 +107,14 @@ func (p *NotifyPlugin) StorageSchema() []sdk.JsonSchema {
 			Enum:        ids,
 			Store:       &storeTrue,
 		},
+		{
+			Type:        sdk.JsonSchemaTypeString,
+			Key:         "base_url",
+			Title:       "camera.ui Base URL",
+			Placeholder: "https://camera.example.com",
+			Description: "Optional. Used to turn camera.ui's relative deep links into absolute tap-through URLs (e.g. ntfy Click).",
+			Store:       &storeTrue,
+		},
 	}
 
 	for _, b := range backends {

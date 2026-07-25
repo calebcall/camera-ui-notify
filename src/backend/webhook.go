@@ -3,6 +3,7 @@ package backend
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -129,15 +130,16 @@ func (w *webhook) ParseTarget(input map[string]any) (map[string]string, error) {
 
 // webhookPayload is the JSON body posted/put to the configured webhook URL.
 type webhookPayload struct {
-	Title     string            `json:"title"`
-	Subtitle  string            `json:"subtitle,omitempty"`
-	Body      string            `json:"body,omitempty"`
-	Severity  string            `json:"severity,omitempty"`
-	Tag       string            `json:"tag,omitempty"`
-	ImageURL  string            `json:"imageUrl,omitempty"`
-	DeepLink  string            `json:"deepLink,omitempty"`
-	Data      map[string]string `json:"data,omitempty"`
-	CreatedAt int64             `json:"createdAt"`
+	Title           string            `json:"title"`
+	Subtitle        string            `json:"subtitle,omitempty"`
+	Body            string            `json:"body,omitempty"`
+	Severity        string            `json:"severity,omitempty"`
+	Tag             string            `json:"tag,omitempty"`
+	ImageURL        string            `json:"imageUrl,omitempty"`
+	DeepLink        string            `json:"deepLink,omitempty"`
+	Data            map[string]string `json:"data,omitempty"`
+	CreatedAt       int64             `json:"createdAt"`
+	ThumbnailBase64 string            `json:"thumbnailBase64,omitempty"`
 }
 
 // Send delivers a single notification as a JSON HTTP request.
@@ -163,6 +165,9 @@ func (w *webhook) Send(ctx context.Context, cfg map[string]string, notif sdk.Not
 		DeepLink:  notif.DeepLink,
 		Data:      notif.Data,
 		CreatedAt: now().UnixMilli(),
+	}
+	if len(notif.Thumbnail) > 0 {
+		payload.ThumbnailBase64 = base64.StdEncoding.EncodeToString(notif.Thumbnail)
 	}
 
 	buf, err := json.Marshal(payload)

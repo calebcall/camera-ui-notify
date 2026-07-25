@@ -266,6 +266,93 @@ func TestSendNotification_PartialFailureDoesNotAbort(t *testing.T) {
 	}
 }
 
+func TestSendNotification_BaseURLMakesRelativeDeepLinkAbsolute(t *testing.T) {
+	fb := registerFakeBackend()
+	p := newTestPlugin(map[string]any{
+		"service":  "fake",
+		"topic":    "sometopic",
+		"base_url": "https://camera.example.com",
+	})
+
+	n := &sdk.Notification{Title: "hello", DeepLink: "/cameras/cam-1?startTs=123"}
+	if err := p.SendNotification([]string{"cfg:fake"}, n); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+	if got := fb.callCount(); got != 1 {
+		t.Fatalf("Send call count = %d, want 1", got)
+	}
+	fb.mu.Lock()
+	gotDeepLink := fb.calls[0].n.DeepLink
+	fb.mu.Unlock()
+	want := "https://camera.example.com/cameras/cam-1?startTs=123"
+	if gotDeepLink != want {
+		t.Fatalf("dispatched DeepLink = %q, want %q", gotDeepLink, want)
+	}
+	if n.DeepLink != "/cameras/cam-1?startTs=123" {
+		t.Fatalf("caller's *n.DeepLink mutated: got %q, want unchanged relative path", n.DeepLink)
+	}
+}
+
+func TestSendNotification_BaseURLTrimsTrailingSlash(t *testing.T) {
+	fb := registerFakeBackend()
+	p := newTestPlugin(map[string]any{
+		"service":  "fake",
+		"topic":    "sometopic",
+		"base_url": "https://camera.example.com/",
+	})
+
+	n := &sdk.Notification{Title: "hello", DeepLink: "/cameras/cam-1"}
+	if err := p.SendNotification([]string{"cfg:fake"}, n); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+	fb.mu.Lock()
+	gotDeepLink := fb.calls[0].n.DeepLink
+	fb.mu.Unlock()
+	want := "https://camera.example.com/cameras/cam-1"
+	if gotDeepLink != want {
+		t.Fatalf("dispatched DeepLink = %q, want %q", gotDeepLink, want)
+	}
+}
+
+func TestSendNotification_NoBaseURLLeavesDeepLinkUnchanged(t *testing.T) {
+	fb := registerFakeBackend()
+	p := newTestPlugin(map[string]any{
+		"service": "fake",
+		"topic":   "sometopic",
+	})
+
+	n := &sdk.Notification{Title: "hello", DeepLink: "/cameras/cam-1"}
+	if err := p.SendNotification([]string{"cfg:fake"}, n); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+	fb.mu.Lock()
+	gotDeepLink := fb.calls[0].n.DeepLink
+	fb.mu.Unlock()
+	if gotDeepLink != "/cameras/cam-1" {
+		t.Fatalf("dispatched DeepLink = %q, want unchanged %q", gotDeepLink, "/cameras/cam-1")
+	}
+}
+
+func TestSendNotification_BaseURLDoesNotAffectAlreadyAbsoluteDeepLink(t *testing.T) {
+	fb := registerFakeBackend()
+	p := newTestPlugin(map[string]any{
+		"service":  "fake",
+		"topic":    "sometopic",
+		"base_url": "https://camera.example.com",
+	})
+
+	n := &sdk.Notification{Title: "hello", DeepLink: "https://other.example.com/x"}
+	if err := p.SendNotification([]string{"cfg:fake"}, n); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+	fb.mu.Lock()
+	gotDeepLink := fb.calls[0].n.DeepLink
+	fb.mu.Unlock()
+	if gotDeepLink != "https://other.example.com/x" {
+		t.Fatalf("dispatched DeepLink = %q, want unchanged absolute URL", gotDeepLink)
+	}
+}
+
 func TestSendNotification_SkipsUnknownID(t *testing.T) {
 	fb := registerFakeBackend()
 	p := newTestPlugin(map[string]any{
@@ -386,6 +473,33 @@ func TestStorageSchema(t *testing.T) {
 	}
 	if topicField.Store == nil || !*topicField.Store {
 		t.Fatalf("ntfy_topic field Store = %v, want true", topicField.Store)
+	}
+}
+
+func TestStorageSchema_BaseURLFieldIsOptionalAndStored(t *testing.T) {
+	registerFakeBackend()
+	p := newTestPlugin(nil)
+
+	schemas := p.StorageSchema()
+
+	var baseURLField *sdk.JsonSchema
+	for i := range schemas {
+		if schemas[i].Key == "base_url" {
+			baseURLField = &schemas[i]
+			break
+		}
+	}
+	if baseURLField == nil {
+		t.Fatalf("expected a %q field in StorageSchema", "base_url")
+	}
+	if baseURLField.Required {
+		t.Fatalf("base_url field must not be Required (optional)")
+	}
+	if baseURLField.Store == nil || !*baseURLField.Store {
+		t.Fatalf("base_url field Store = %v, want true", baseURLField.Store)
+	}
+	if len(baseURLField.Condition) != 0 {
+		t.Fatalf("base_url field Condition = %+v, want empty (not service-gated)", baseURLField.Condition)
 	}
 }
 

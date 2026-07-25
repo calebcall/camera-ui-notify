@@ -133,6 +133,10 @@ func (g *gotify) Send(ctx context.Context, cfg map[string]string, notif sdk.Noti
 		Priority: PriorityScale(notif.Severity, 0, 10),
 	}
 
+	// Inline notif.Thumbnail bytes aren't supported here: Gotify's
+	// client::notification.bigImageUrl extra needs a hosted URL, not raw
+	// bytes, so only notif.ImageURL can be forwarded as an image.
+
 	if notif.DeepLink != "" || notif.ImageURL != "" {
 		extras := &gotifyExtras{}
 		if notif.DeepLink != "" {
