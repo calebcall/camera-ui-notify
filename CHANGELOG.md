@@ -5,6 +5,24 @@ All notable changes to **Notify** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-25
+
+### Added
+
+- **Pushover backend** — hosted push to the Pushover app (app token + user key); sends the snapshot
+  as an attachment and maps severity to Pushover priority (Info=0, higher=1).
+- **Telegram backend** — delivery to a chat via a bot (bot token + chat ID); `sendPhoto` with the
+  snapshot when present, else `sendMessage`, with an inline "Open camera" button for the deep link.
+- **Discord backend** — delivery via a channel webhook; a severity-colored embed with the snapshot
+  attached and the title linked to the deep link.
+
+### Security
+
+- **Redact secrets from transport errors.** Telegram's bot token (in the request URL path), a
+  Discord webhook URL (itself a credential), and any secret embedded in a generic webhook URL are
+  no longer leaked into logs when a delivery request fails — request URLs are stripped from
+  `*url.Error` before wrapping.
+
 ## [0.3.0] - 2026-07-25
 
 ### Added
