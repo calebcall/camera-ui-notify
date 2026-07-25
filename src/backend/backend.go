@@ -7,12 +7,30 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"sync"
 
 	sdk "github.com/cameraui/sdk/go"
 )
+
+// RedactRequestError strips the request URL from an *http.Client error before
+// it is logged. Go's transport errors are *url.Error, whose Error() embeds the
+// full request URL — which for several backends carries a secret (Telegram's
+// bot token is in the path, a Discord webhook URL is itself a bearer
+// credential, a webhook URL may embed a shared secret). Returning only the
+// underlying cause keeps transport failures (DNS/refused/TLS/timeout) out of
+// the logs with the credential intact. Non-*url.Error values pass through
+// unchanged. Backends wrap client.Do / NewRequest errors with this.
+func RedactRequestError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.Err != nil {
+		return ue.Err
+	}
+	return err
+}
 
 // Backend abstracts one notification delivery service. Implementations are
 // stateless with respect to any single device — all per-device

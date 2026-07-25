@@ -180,7 +180,7 @@ func (w *webhook) Send(ctx context.Context, cfg map[string]string, notif sdk.Not
 	}
 	req, err := http.NewRequestWithContext(ctx, method, targetURL, bytes.NewReader(buf))
 	if err != nil {
-		return fmt.Errorf("webhook: build request: %w", err)
+		return fmt.Errorf("webhook: build request: %w", RedactRequestError(err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -195,7 +195,7 @@ func (w *webhook) Send(ctx context.Context, cfg map[string]string, notif sdk.Not
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("webhook: request failed: %w", err)
+		return fmt.Errorf("webhook: request failed: %w", RedactRequestError(err))
 	}
 	defer resp.Body.Close()
 

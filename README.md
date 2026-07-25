@@ -3,8 +3,8 @@
 <p align="center">
   A fully-local, multi-backend <a href="https://github.com/seydx/camera.ui">camera.ui</a> notifier
   plugin — delivers notifications to a service you control (<a href="https://ntfy.sh">ntfy</a>,
-  <a href="https://gotify.net">Gotify</a>, or a generic webhook), entirely on your own hardware,
-  with no cloud dependency and no license check.
+  <a href="https://gotify.net">Gotify</a>, Pushover, Telegram, Discord, or a generic webhook),
+  entirely on your own hardware, with no cloud dependency and no license check.
 </p>
 
 ---
@@ -107,15 +107,57 @@ Delivers to any HTTP endpoint you provide — the fallback for anything without 
 
 Delivery: `{method} {url}` with `Content-Type: application/json` and (if configured) the custom
 header, carrying a JSON body of `{title, subtitle, body, severity, tag, imageUrl, deepLink, data,
-createdAt}`.
+createdAt, thumbnailBase64}`.
+
+### Pushover
+
+Hosted push to the [Pushover](https://pushover.net) app.
+
+| Field    | Required | Notes                                          |
+| -------- | -------- | ---------------------------------------------- |
+| `token`  | yes      | Pushover application API token/key.            |
+| `user`   | yes      | Your Pushover user or group key.               |
+
+Delivery: `POST https://api.pushover.net/1/messages.json` with title/message and a priority
+(Info→0 normal, everything higher→1 high; never emergency). The snapshot **image** is sent as an
+`attachment`, and an absolute deep link becomes a supplementary `url`.
+
+### Telegram
+
+Delivers to a chat via a [Telegram bot](https://core.telegram.org/bots).
+
+| Field   | Required | Notes                                                    |
+| ------- | -------- | -------------------------------------------------------- |
+| `token` | yes      | Bot token from @BotFather.                               |
+| `chat`  | yes      | Chat ID to deliver to.                                   |
+
+Delivery: `sendPhoto` (with the snapshot **image** + caption) when a thumbnail is present, otherwise
+`sendMessage`. An absolute deep link is added as an inline "Open camera" button.
+
+### Discord
+
+Delivers to a channel via a Discord [webhook](https://support.discord.com/hc/en-us/articles/228383668).
+
+| Field     | Required | Notes                                   |
+| --------- | -------- | --------------------------------------- |
+| `webhook` | yes      | Channel webhook URL.                    |
+
+Delivery: a rich embed (title, body, severity color — blue/yellow/red) with the snapshot **image**
+attached; an absolute deep link makes the title a link.
+
+> **Images:** ntfy, Pushover, Telegram, and Discord all render the detection snapshot. Gotify is
+> text + link only (it needs a hosted image URL, which this fully-local plugin doesn't provide).
+
+> **Secrets in logs:** transport failures never log the bot token / webhook URL / other
+> URL-embedded secret — request URLs are redacted from delivery errors.
 
 ## Configuring your target (v1: one active target)
 
 There is no "add device" flow. Instead, configure the plugin itself:
 
 1. Open the **Notify** plugin's page in camera.ui (Plugins → Notify).
-2. In its settings, pick a **Service** (`ntfy`, `Gotify`, or `Generic webhook`) from the dropdown
-   built from the registered backends.
+2. In its settings, pick a **Service** (`ntfy`, `Gotify`, `Generic webhook`, `Pushover`, `Telegram`,
+   or `Discord`) from the dropdown built from the registered backends.
 3. Fill in that service's fields — only the selected service's fields are shown; the rest are
    condition-gated out.
 4. Save. The config is validated (`ParseTarget`) the next time a notification is dispatched;
