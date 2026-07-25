@@ -35,15 +35,16 @@ type SchemaCondition struct { Key string; Value any; Operator SchemaConditionOpe
 
 **Notifier RPC surface the host calls (wire names → exported Go methods):**
 ```go
-GetDevices(ownerUserIDs []string) ([]sdk.NotifierDevice, error)        // getDevices
-GetDevice(deviceID string) (*sdk.NotifierDevice, error)                // getDevice (nil = not ours)
-RegisterDevice(ownerUserID string, input map[string]any) (sdk.NotifierDevice, error) // registerDevice
-RevokeDevice(deviceID string) error                                    // revokeDevice
-UpdateDevice(deviceID string, patch map[string]any) (*sdk.NotifierDevice, error) // updateDevice (nil = not ours)
-SendNotification(deviceIDs []string, n sdk.Notification) error         // sendNotification
-NotificationSettings() ([]sdk.JsonSchema, error)                       // notificationSettings
+// VERIFIED against externals/sdk/go/plugin_notifier.go (Task 1) — use exactly:
+GetDevices(ownerUserIDs []string) ([]sdk.NotifierDevice, error)                       // getDevices
+GetDevice(deviceID string) (*sdk.NotifierDevice, error)                               // getDevice (nil = not ours)
+RegisterDevice(ownerUserID string, input map[string]any) (*sdk.NotifierDevice, error) // registerDevice (POINTER return)
+RevokeDevice(deviceID string) error                                                   // revokeDevice
+UpdateDevice(deviceID string, patch map[string]any) (*sdk.NotifierDevice, error)      // updateDevice (nil = not ours)
+SendNotification(deviceIDs []string, n *sdk.Notification) error                       // sendNotification (POINTER arg)
+NotificationSettings() ([]sdk.JsonSchema, error)                                      // notificationSettings
 ```
-> Task 1 must confirm these exact signatures against `plugin_notifier.go` / how the host proxy calls them; adjust arg/return types to match the SDK if they differ (e.g. `*Notification` vs `Notification`).
+> Task 4 dispatches to `backend.Send(ctx, cfg, n sdk.Notification)` (value) by dereferencing the `*sdk.Notification` it receives.
 
 ---
 
