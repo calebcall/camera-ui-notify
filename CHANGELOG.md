@@ -5,6 +5,30 @@ All notable changes to **Notify** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-25
+
+### Added
+
+- **Inline thumbnail image (ntfy).** When a notification carries inline thumbnail bytes (e.g. the
+  NVR's detection snapshot) and no image URL, the ntfy backend uploads it as a file attachment so
+  the image renders in the notification.
+- **Absolute deep links.** A new optional plugin config field, **camera.ui Base URL**, turns the
+  publisher's relative deep link (e.g. `/cameras/<name>?startTs=…`) into an absolute URL so ntfy's
+  tap-through (`Click`) works. Empty base URL leaves the link untouched.
+- **Webhook thumbnail.** The generic webhook backend now includes the thumbnail as `thumbnailBase64`
+  in its JSON payload when present.
+
+### Fixed
+
+- **Gotify visibility.** Severity now maps to Gotify priority 4–10 (Info=4 … Critical=10). Gotify
+  treats priority 0–3 as silent (no system notification), so the previous 0–10 mapping made
+  Info-severity notifications appear to deliver nothing.
+
+### Notes
+
+- Gotify cannot display an inline thumbnail image (it requires a hosted image URL, not raw bytes);
+  images are delivered on ntfy only.
+
 ## [0.2.0] - 2026-07-24
 
 ### Changed
