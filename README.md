@@ -3,8 +3,7 @@
 <p align="center">
   A fully-local, multi-backend <a href="https://github.com/seydx/camera.ui">camera.ui</a> notifier
   plugin — delivers notifications to a service you control (<a href="https://ntfy.sh">ntfy</a>,
-  <a href="https://gotify.net">Gotify</a>, Pushover, Telegram, Discord, or a generic webhook),
-  entirely on your own hardware, with no cloud dependency and no license check.
+  <a href="https://gotify.net">Gotify</a>, Pushover, Telegram, Discord, or a generic webhook).
 </p>
 
 ---
@@ -13,18 +12,13 @@
 
 camera.ui separates two notification roles:
 
-- **Publishers** (capability `PublishNotifications`) emit events. Our open-source NVR plugin
-  (`@calebcall/camera-ui-nvr-local`) is a publisher — it calls `NotificationManager.Publish` for
-  object-detection events.
 - **Notifiers** (interface `Notifier`) own delivery *devices* and actually deliver notifications.
   The host's `NotificationManager.notify()` fans every notification out to **all** running plugins
   implementing `Notifier`.
 
 There is intentionally no notifier in the open ecosystem: the closed, official NVR bundled a
 notifier that pushed to the camera.ui mobile app through camera.ui's proprietary FCM/APNs cloud
-relay — a license-gated path we neither have credentials for nor can replicate. This plugin takes
-the only fully-local road to real background push instead: delivering to a push/webhook service
-*you* run or control.
+relay. This plugin takes the only fully-local road to real background push instead: delivering to a push/webhook service *you* run or control.
 
 This plugin is a pure **notifier**. It is decoupled from any single publisher — it delivers
 notifications from **any** publisher, including our NVR plugin's detection events and camera.ui's
@@ -197,8 +191,7 @@ The install slot is:
 ```
 
 and the plugin's config (the selected service and its fields) lives under
-`<camera.ui-install>/volume/plugins/storage/@calebcall/camera-ui-notify/` — reinstalling the code
-does not touch it.
+`<camera.ui-install>/volume/plugins/storage/@calebcall/camera-ui-notify/` — reinstalling the code does not touch it.
 
 > **Unlike the NVR plugin**, there is no hardcoded-package-id requirement here: the camera.ui host
 > discovers notifiers by the `Notifier` **interface** declared in the plugin's contract, not by a
