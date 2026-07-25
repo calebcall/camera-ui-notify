@@ -5,6 +5,24 @@ All notable changes to **Notify** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-25
+
+### Fixed
+
+- **Images now delivered when the publisher uses `ImageURL`** — the official (closed) NVR publishes the
+  snapshot as a hosted `ImageURL` rather than inline `Thumbnail` bytes, so the inline-only backends
+  (Telegram, Discord, Pushover) delivered text with no image. `SendNotification` now fetches an
+  `ImageURL` once (when no inline `Thumbnail` is present) and attaches the bytes, so every backend
+  renders the image regardless of which NVR published it. A fetch failure degrades gracefully: the
+  `ImageURL` is left intact for URL-capable backends (ntfy/Gotify/webhook) and delivery is never
+  aborted. Fetches are capped at 8 MiB.
+
+### Added
+
+- **Send-path logging** — `sendNotification` now logs the incoming notification (title, severity, which
+  image fields are present), image resolution, and per-device delivery outcome via `Log`/`Success`/
+  `Warn`/`Error` (visible without the debug flag), so the send flow is observable in normal operation.
+
 ## [0.4.2] - 2026-07-25
 
 ### Updated

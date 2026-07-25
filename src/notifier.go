@@ -4,12 +4,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
+	"time"
 
 	sdk "github.com/cameraui/sdk/go"
 
 	"github.com/calebcall/camera-ui-notify/src/backend"
 )
+
+// imageFetchClient fetches a notification's hosted ImageURL when a backend
+// needs inline bytes (see resolveThumbnail). Its timeout is deliberately short:
+// a slow snapshot host must never stall the whole notification fan-out.
+// Package-level so tests can point it at an httptest server.
+var imageFetchClient = &http.Client{Timeout: 10 * time.Second}
+
+// maxThumbnailBytes caps a fetched ImageURL so a hostile or oversized image
+// can't exhaust memory. 8 MiB comfortably covers any camera snapshot.
+const maxThumbnailBytes = 8 << 20
 
 // notifierDeviceIDPrefix prefixes the selected service id to form the single
 // synthesized device's stable id (e.g. "cfg:ntfy"). Stable across calls
@@ -128,6 +141,9 @@ func (p *NotifyPlugin) UpdateDevice(deviceID string, patch map[string]any) (*sdk
 func (p *NotifyPlugin) SendNotification(deviceIDs []string, n *sdk.Notification) error {
 	var errs []error
 
+	p.logf("notify: sendNotification for %d device(s): title=%q severity=%q hasThumbnail=%t imageUrl=%t deepLink=%t",
+		len(deviceIDs), n.Title, n.Severity, len(n.Thumbnail) > 0, n.ImageURL != "", n.DeepLink != "")
+
 	// base_url is plugin-level config (not per-backend), so it's read once
 	// here rather than threaded into each backend's cfg map. When set, and
 	// the notification's DeepLink is router-relative (as published by
@@ -142,18 +158,25 @@ func (p *NotifyPlugin) SendNotification(deviceIDs []string, n *sdk.Notification)
 		toSend.DeepLink = strings.TrimRight(baseURL, "/") + n.DeepLink
 	}
 
+	// Some publishers (notably the closed NVR) attach the snapshot as a hosted
+	// ImageURL and no inline Thumbnail. Backends that can only send inline
+	// bytes (Telegram/Discord/Pushover) would otherwise deliver text only.
+	// Resolve once on the copy so *n is never mutated and the fetch is shared
+	// across every device in this fan-out.
+	p.resolveThumbnail(context.Background(), &toSend)
+
+	dispatched := 0
 	for _, id := range deviceIDs {
 		dev, err := p.GetDevice(id)
 		if err != nil || dev == nil || !dev.Active {
+			p.logf("notify: device %s not deliverable (unknown, inactive, or not ours), skipping", id)
 			continue
 		}
 
 		service, _ := dev.Metadata["service"].(string)
 		b, ok := backend.Get(service)
 		if !ok {
-			if p.Logger != nil {
-				p.Logger.Warn(fmt.Sprintf("notify: device %s references unknown service %q, skipping", id, service))
-			}
+			p.warnf("notify: device %s references unknown service %q, skipping", id, service)
 			continue
 		}
 
@@ -167,16 +190,99 @@ func (p *NotifyPlugin) SendNotification(deviceIDs []string, n *sdk.Notification)
 			}
 		}
 
+		p.logf("notify: dispatching to device %s via %q", id, service)
 		if err := b.Send(context.Background(), cfg, toSend); err != nil {
 			wrapped := fmt.Errorf("device %s (%s): %w", id, service, err)
-			if p.Logger != nil {
-				p.Logger.Error(fmt.Sprintf("notify: send failed: %v", wrapped))
-			}
+			p.errorf("notify: send failed: %v", wrapped)
 			errs = append(errs, wrapped)
+			continue
 		}
+		dispatched++
+		p.successf("notify: delivered to device %s via %q", id, service)
 	}
 
+	p.logf("notify: sendNotification complete: %d delivered, %d failed", dispatched, len(errs))
 	return errors.Join(errs...)
+}
+
+// resolveThumbnail ensures the notification carries inline image bytes when the
+// publisher supplied only a hosted ImageURL. The closed NVR sets ImageURL and
+// no inline Thumbnail (the SDK's stated preference), but Telegram/Discord/
+// Pushover can only attach inline bytes — without this they'd deliver text
+// only. When a Thumbnail is already present, or no ImageURL was given, this is
+// a no-op. A fetch failure is logged and swallowed: ImageURL is left intact so
+// URL-capable backends (ntfy/Gotify/webhook) still render it, and the others
+// degrade to text — delivery is never aborted for a missing image.
+func (p *NotifyPlugin) resolveThumbnail(ctx context.Context, n *sdk.Notification) {
+	if len(n.Thumbnail) > 0 || n.ImageURL == "" {
+		return
+	}
+	data, err := fetchImage(ctx, imageFetchClient, n.ImageURL)
+	if err != nil {
+		p.warnf("notify: could not fetch ImageURL for inline attachment (delivering text/URL only): %v", backend.RedactRequestError(err))
+		return
+	}
+	p.logf("notify: fetched %d image bytes from ImageURL for inline attachment", len(data))
+	n.Thumbnail = data
+}
+
+// fetchImage GETs url and returns the response body, capped at
+// maxThumbnailBytes. A non-2xx status or an empty body is an error. Kept
+// separate from resolveThumbnail so it is unit-testable against an httptest
+// server.
+func fetchImage(ctx context.Context, client *http.Client, url string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("image fetch: server responded %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxThumbnailBytes))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("image fetch: empty response body")
+	}
+	return data, nil
+}
+
+// logf / successf / warnf / errorf are nil-safe, Sprintf-style wrappers around
+// the plugin logger so the send path can log without repeating the p.Logger !=
+// nil guard at every call site. Log/Success/Warn/Error are used (not Debug,
+// which is suppressed unless the debug flag is set) so the send flow is visible
+// in normal operation.
+func (p *NotifyPlugin) logf(format string, args ...any) {
+	if p.Logger != nil {
+		p.Logger.Log(fmt.Sprintf(format, args...))
+	}
+}
+
+func (p *NotifyPlugin) successf(format string, args ...any) {
+	if p.Logger != nil {
+		p.Logger.Success(fmt.Sprintf(format, args...))
+	}
+}
+
+func (p *NotifyPlugin) warnf(format string, args ...any) {
+	if p.Logger != nil {
+		p.Logger.Warn(fmt.Sprintf(format, args...))
+	}
+}
+
+func (p *NotifyPlugin) errorf(format string, args ...any) {
+	if p.Logger != nil {
+		p.Logger.Error(fmt.Sprintf(format, args...))
+	}
 }
 
 // NotificationSettings implements sdk.NotifierInterface. The service
