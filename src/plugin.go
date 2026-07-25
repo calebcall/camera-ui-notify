@@ -21,6 +21,12 @@ const devicesStorageKey = "devices"
 // (RPCMethods, StorageSchema); the Notifier methods themselves are Task 4.
 type NotifyPlugin struct {
 	sdk.BasePlugin
+
+	// store is the persisted registry of this plugin's NotifierDevice
+	// records (Task 3's src/store.go), backed by BasePlugin.Storage under
+	// devicesStorageKey. Task 4's Notifier RPC methods (src/notifier.go)
+	// read and write through it exclusively.
+	store *deviceStore
 }
 
 // NewPlugin constructs the plugin. Signature is fixed by sdk.Run's
@@ -28,6 +34,7 @@ type NotifyPlugin struct {
 func NewPlugin(logger *sdk.Logger, api *sdk.PluginAPI, storage *sdk.DeviceStorage) sdk.Plugin {
 	return &NotifyPlugin{
 		BasePlugin: sdk.NewBasePlugin(logger, api, storage),
+		store:      newDeviceStore(storage),
 	}
 }
 
@@ -51,12 +58,18 @@ func (p *NotifyPlugin) OnCameraReleased(cameraID string) error {
 // RPCMethods is the RPCMethodAllowlist the SDK's rpc layer checks before
 // registering any exported method as a wire-callable subject (Global
 // Constraints: "every wire name MUST be listed in RPCMethods() or it is
-// never registered"). Empty for this task — the seven Notifier wire methods
-// (getDevices, getDevice, registerDevice, revokeDevice, updateDevice,
-// sendNotification, notificationSettings) are added in Task 4 once they're
-// implemented in src/notifier.go.
+// never registered"). Lists the seven Notifier wire names (wire name =
+// first-letter-lowercased Go method name) implemented in src/notifier.go.
 func (p *NotifyPlugin) RPCMethods() []string {
-	return []string{}
+	return []string{
+		"getDevices",
+		"getDevice",
+		"registerDevice",
+		"revokeDevice",
+		"updateDevice",
+		"sendNotification",
+		"notificationSettings",
+	}
 }
 
 // StorageSchema declares this plugin's persisted storage keys. Required per
