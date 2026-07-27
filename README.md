@@ -79,7 +79,7 @@ Hosted push to the [Pushover](https://pushover.net) app.
 | `token`  | yes      | Pushover application API token/key.            |
 | `user`   | yes      | Your Pushover user or group key.               |
 
-Delivery: `POST https://api.pushover.net/1/messages.json` with title/message and a priority (Info→0 normal, everything higher→1 high; never emergency). The snapshot **image** is sent as an `attachment`, and an absolute deep link becomes a supplementary `url`.
+Delivery: `POST https://api.pushover.net/1/messages.json` with title/message and a priority (Info→0 normal, everything higher→1 high; never emergency). The snapshot **image** is sent as an `attachment`, and an absolute deep link becomes a supplementary `url` titled "Open camera" for a detection or "Open in camera.ui" for anything else.
 
 ### Telegram
 
@@ -90,7 +90,7 @@ Delivers to a chat via a [Telegram bot](https://core.telegram.org/bots).
 | `token` | yes      | Bot token from @BotFather.                               |
 | `chat`  | yes      | Chat ID to deliver to.                                   |
 
-Delivery: `sendPhoto` (with the snapshot **image** + caption) when a thumbnail is present, otherwise `sendMessage`. An absolute deep link is added as an inline "Open camera" button.
+Delivery: `sendPhoto` (with the snapshot **image** + caption) when a thumbnail is present, otherwise `sendMessage`. An absolute deep link is added as an inline button, labelled "Open camera" when it opens a camera page and "Open in camera.ui" otherwise.
 
 ### Discord
 

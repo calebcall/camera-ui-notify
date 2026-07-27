@@ -126,9 +126,11 @@ func (p *pushover) Send(ctx context.Context, cfg map[string]string, notif sdk.No
 		"message":  message,
 		"priority": strconv.Itoa(pushoverPriority(notif.Severity)),
 	}
+	// url_title comes from DeepLinkLabel so a non-detection notification
+	// (plugin update, system alert) isn't labelled "Open camera".
 	if strings.HasPrefix(notif.DeepLink, "http") {
 		fields["url"] = notif.DeepLink
-		fields["url_title"] = "Open camera"
+		fields["url_title"] = DeepLinkLabel(notif)
 	}
 
 	baseURL := p.baseURL

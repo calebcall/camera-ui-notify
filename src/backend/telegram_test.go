@@ -164,6 +164,46 @@ func TestTelegramSendMessageLinkOnlyWhenDeepLinkAbsolute(t *testing.T) {
 	}
 }
 
+func TestTelegramSendMessageButtonLabelMatchesDestination(t *testing.T) {
+	labelFor := func(notif sdk.Notification) string {
+		var gotBody decodedTelegramMessagePayload
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &gotBody)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		tg := newTelegram()
+		tg.client = srv.Client()
+		tg.baseURL = srv.URL
+
+		cfg := map[string]string{"token": "tk", "chat": "123"}
+		_ = tg.Send(nil, cfg, notif)
+		if gotBody.ReplyMarkup == nil || len(gotBody.ReplyMarkup.InlineKeyboard) != 1 || len(gotBody.ReplyMarkup.InlineKeyboard[0]) != 1 {
+			t.Fatalf("reply_markup = %+v, want one inline button", gotBody.ReplyMarkup)
+		}
+		return gotBody.ReplyMarkup.InlineKeyboard[0][0].Text
+	}
+
+	detection := sdk.Notification{
+		Title:    "Motion detected",
+		DeepLink: "https://camera.example.com/cameras/cam-1?startTs=123",
+		Data:     map[string]string{"cameraId": "cam-1"},
+	}
+	if got := labelFor(detection); got != DeepLinkLabelCamera {
+		t.Errorf("detection button text = %q, want %q", got, DeepLinkLabelCamera)
+	}
+
+	pluginUpdate := sdk.Notification{
+		Title:    "Plugin update available",
+		DeepLink: "https://camera.example.com/settings/plugins",
+	}
+	if got := labelFor(pluginUpdate); got != DeepLinkLabelOther {
+		t.Errorf("plugin-update button text = %q, want %q", got, DeepLinkLabelOther)
+	}
+}
+
 func TestTelegramSendPhotoWithThumbnail(t *testing.T) {
 	var gotPath, gotContentType string
 	var gotFields map[string]string

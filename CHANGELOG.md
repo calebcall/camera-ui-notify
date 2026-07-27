@@ -5,6 +5,17 @@ All notable changes to **Notify** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-07-26
+
+### Fixed
+
+- **Deep-link button no longer says "Open camera" on non-detection notifications** — the tap-through
+  label was hardcoded and applied to any absolute deep link, so plugin-update, system-update and other
+  operational notifications rendered a correct link under an incorrect label. The label is now derived
+  from the link's destination: "Open camera" when it opens a specific camera's page, "Open in camera.ui"
+  otherwise. Affects Telegram (inline-keyboard button) and Pushover (`url_title`); ntfy, Gotify, Discord
+  and the generic webhook carry no label text and were never affected.
+
 ## [0.5.1] - 2026-07-25
 
 ### Fixed

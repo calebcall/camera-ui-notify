@@ -125,15 +125,17 @@ func telegramText(notif sdk.Notification) string {
 	return notif.Title + "\n" + notif.Body
 }
 
-// telegramReplyMarkupFor builds the "Open camera" inline-keyboard reply
-// markup for an absolute DeepLink, or nil when there is none.
+// telegramReplyMarkupFor builds the tap-through inline-keyboard reply markup
+// for an absolute DeepLink, or nil when there is none. The button text comes
+// from DeepLinkLabel so a non-detection notification (plugin update, system
+// alert) isn't labelled "Open camera".
 func telegramReplyMarkupFor(notif sdk.Notification) *telegramReplyMarkup {
 	if !strings.HasPrefix(notif.DeepLink, "http") {
 		return nil
 	}
 	return &telegramReplyMarkup{
 		InlineKeyboard: [][]telegramInlineButton{
-			{{Text: "Open camera", URL: notif.DeepLink}},
+			{{Text: DeepLinkLabel(notif), URL: notif.DeepLink}},
 		},
 	}
 }

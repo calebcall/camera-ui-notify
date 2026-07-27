@@ -195,6 +195,43 @@ func TestPushoverSendLinkOnlyWhenDeepLinkAbsolute(t *testing.T) {
 	}
 }
 
+func TestPushoverSendURLTitleMatchesDestination(t *testing.T) {
+	urlTitleFor := func(notif sdk.Notification) string {
+		var gotValues url.Values
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			gotValues, _ = url.ParseQuery(string(b))
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		p := newPushover()
+		p.client = srv.Client()
+		p.baseURL = srv.URL
+
+		cfg := map[string]string{"token": "tk", "user": "u1"}
+		_ = p.Send(nil, cfg, notif)
+		return gotValues.Get("url_title")
+	}
+
+	detection := sdk.Notification{
+		Title:    "Motion detected",
+		DeepLink: "https://camera.example.com/cameras/cam-1?startTs=123",
+		Data:     map[string]string{"cameraId": "cam-1"},
+	}
+	if got := urlTitleFor(detection); got != DeepLinkLabelCamera {
+		t.Errorf("detection url_title = %q, want %q", got, DeepLinkLabelCamera)
+	}
+
+	pluginUpdate := sdk.Notification{
+		Title:    "Plugin update available",
+		DeepLink: "https://camera.example.com/settings/plugins",
+	}
+	if got := urlTitleFor(pluginUpdate); got != DeepLinkLabelOther {
+		t.Errorf("plugin-update url_title = %q, want %q", got, DeepLinkLabelOther)
+	}
+}
+
 func TestPushoverSendWithThumbnailUsesMultipartAttachment(t *testing.T) {
 	var gotContentType string
 	var gotFields url.Values
