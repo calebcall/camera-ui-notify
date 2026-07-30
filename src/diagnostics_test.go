@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	sdk "github.com/cameraui/sdk/go"
@@ -142,5 +143,66 @@ func TestFormatProbeDiag(t *testing.T) {
 				t.Fatalf("\n got %s\nwant %s", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestFormatDetectionDiag_NoDescription(t *testing.T) {
+	ev := sdk.DetectionEvent{
+		ID: "evt-1", CameraID: "cam-1", State: sdk.DetectionEventStateActive,
+		StartTime: 1000,
+		Segments:  []sdk.EventSegment{{}},
+	}
+	got := formatDetectionDiag(sdk.DetectionEventSegmentStart, ev, 4000)
+	want := diagPrefix + ` detectionEvent: type=segment-start eventId="evt-1" cameraId="cam-1" ` +
+		`state="active" segments=1 withSummary=[] elapsedMs=3000`
+	if got != want {
+		t.Fatalf("\n got %s\nwant %s", got, want)
+	}
+}
+
+func TestFormatDetectionDiag_ReportsSegmentsCarryingSummary(t *testing.T) {
+	ev := sdk.DetectionEvent{
+		ID: "evt-2", CameraID: "cam-1", State: sdk.DetectionEventStateActive,
+		StartTime: 1000,
+		Segments: []sdk.EventSegment{
+			{},
+			{Description: &sdk.EventDescription{Summary: "A man approached the door."}},
+			{Description: &sdk.EventDescription{Summary: "   "}},
+		},
+	}
+	got := formatDetectionDiag(sdk.DetectionEventSegmentUpdate, ev, 61000)
+	want := diagPrefix + ` detectionEvent: type=segment-update eventId="evt-2" cameraId="cam-1" ` +
+		`state="active" segments=3 withSummary=[1] elapsedMs=60000`
+	if got != want {
+		t.Fatalf("\n got %s\nwant %s", got, want)
+	}
+}
+
+func TestFormatDetectionDiag_UnknownStartTime(t *testing.T) {
+	ev := sdk.DetectionEvent{ID: "evt-3", CameraID: "cam-1"}
+	got := formatDetectionDiag(sdk.DetectionEventEnd, ev, 5000)
+	if !strings.Contains(got, "elapsedMs=-1") {
+		t.Fatalf("want elapsedMs=-1 when StartTime is unset, got %s", got)
+	}
+}
+
+func TestDiagLogCap_AllowsUpToLimitPerEvent(t *testing.T) {
+	c := newDiagLogCap(3)
+	for i := 1; i <= 3; i++ {
+		if !c.allow("evt-1") {
+			t.Fatalf("call %d for evt-1 denied, want allowed", i)
+		}
+	}
+	if c.allow("evt-1") {
+		t.Fatal("call 4 for evt-1 allowed, want denied")
+	}
+	if !c.allow("evt-2") {
+		t.Fatal("a different event should have its own budget")
+	}
+}
+
+func TestDiagLogCap_ZeroLimitDeniesEverything(t *testing.T) {
+	if newDiagLogCap(0).allow("evt-1") {
+		t.Fatal("zero limit allowed a line, want denied")
 	}
 }

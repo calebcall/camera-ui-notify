@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	sdk "github.com/cameraui/sdk/go"
 )
@@ -163,4 +164,60 @@ func (p *NotifyPlugin) diagProbeCamera(cameraID string) *sdk.CameraDevice {
 	}
 	p.logf("%s", formatProbeDiag(cameraID, cam != nil, name, err))
 	return cam
+}
+
+// formatDetectionDiag renders one detection-event message.
+//
+// nowMs is passed in rather than read from the clock so the output is
+// deterministic under test. elapsedMs is the answer to question 4: how long
+// after event start a Summary becomes available, which sets the feature's
+// timeout default. It is -1 when StartTime is unset, so an unknown elapsed time
+// is never mistaken for a fast one.
+//
+// A segment counts as carrying a description only when Summary is non-blank: a
+// non-nil Description with an empty Summary is useless to a notification, and
+// counting it would overstate availability.
+func formatDetectionDiag(eventType sdk.DetectionEventType, ev sdk.DetectionEvent, nowMs int64) string {
+	withSummary := make([]string, 0, len(ev.Segments))
+	for i, seg := range ev.Segments {
+		if seg.Description != nil && strings.TrimSpace(seg.Description.Summary) != "" {
+			withSummary = append(withSummary, fmt.Sprintf("%d", i))
+		}
+	}
+
+	elapsed := int64(-1)
+	if ev.StartTime > 0 {
+		elapsed = nowMs - ev.StartTime
+	}
+
+	return fmt.Sprintf(
+		"%s detectionEvent: type=%s eventId=%q cameraId=%q state=%q segments=%d withSummary=[%s] elapsedMs=%d",
+		diagPrefix, string(eventType), ev.ID, ev.CameraID, string(ev.State),
+		len(ev.Segments), strings.Join(withSummary, ","), elapsed,
+	)
+}
+
+// diagLogCap bounds diagnostic lines per event id so a busy camera cannot flood
+// the log during an observation window.
+type diagLogCap struct {
+	mu    sync.Mutex
+	limit int
+	seen  map[string]int
+}
+
+func newDiagLogCap(limit int) *diagLogCap {
+	return &diagLogCap{limit: limit, seen: map[string]int{}}
+}
+
+// allow reports whether another line may be emitted for eventID, counting this
+// request. Each event id gets its own budget so one chatty event cannot silence
+// the others.
+func (c *diagLogCap) allow(eventID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.limit <= 0 {
+		return false
+	}
+	c.seen[eventID]++
+	return c.seen[eventID] <= c.limit
 }
