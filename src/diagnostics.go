@@ -79,3 +79,88 @@ func (p *NotifyPlugin) diagNotification(n *sdk.Notification) {
 	}
 	p.logf("%s", formatNotificationDiag(n))
 }
+
+// diagCamera is the minimal projection of a camera the diagnostics need.
+//
+// Formatting is defined over this rather than over *sdk.CameraDevice because
+// CameraDevice's fields are unexported and it has no exported constructor, so a
+// test cannot build one carrying a meaningful id or name. Keeping the format
+// logic here makes it fully testable and leaves toDiagCameras as a trivial loop.
+type diagCamera struct {
+	ID   string
+	Name string
+}
+
+// formatCamerasDiag reports which cameras the host handed this plugin. Zero is
+// the expected answer today (Notify declares provides/consumes empty and is
+// assigned no cameras) — question 2 exists to confirm that rather than assume it.
+func formatCamerasDiag(cams []diagCamera) string {
+	if len(cams) == 0 {
+		return diagPrefix + " configureCameras: 0 cameras assigned to Notify"
+	}
+	parts := make([]string, 0, len(cams))
+	for _, c := range cams {
+		parts = append(parts, fmt.Sprintf("%s(%q)", c.ID, c.Name))
+	}
+	return fmt.Sprintf("%s configureCameras: %d camera(s) assigned: %s",
+		diagPrefix, len(cams), strings.Join(parts, " "))
+}
+
+// toDiagCameras projects SDK camera devices onto diagCamera, dropping nils.
+func toDiagCameras(cams []*sdk.CameraDevice) []diagCamera {
+	out := make([]diagCamera, 0, len(cams))
+	for _, c := range cams {
+		if c == nil {
+			continue
+		}
+		out = append(out, diagCamera{ID: c.ID(), Name: c.Name()})
+	}
+	return out
+}
+
+// formatProbeDiag renders the outcome of a GetCamera probe. The three outcomes
+// are spelled out in the message because this single line decides whether the
+// feature needs a per-camera hub assignment or can look cameras up lazily.
+func formatProbeDiag(cameraID string, found bool, name string, err error) string {
+	switch {
+	case err != nil:
+		return fmt.Sprintf("%s getCamera(%q): ERROR %v -- unassigned cameras are NOT reachable",
+			diagPrefix, cameraID, err)
+	case !found:
+		return fmt.Sprintf("%s getCamera(%q): nil (no error) -- camera not visible to this plugin",
+			diagPrefix, cameraID)
+	default:
+		return fmt.Sprintf("%s getCamera(%q): OK name=%q -- unassigned cameras ARE reachable",
+			diagPrefix, cameraID, name)
+	}
+}
+
+// diagCameras emits the assigned-camera inventory when enabled.
+func (p *NotifyPlugin) diagCameras(cams []*sdk.CameraDevice) {
+	if !diagEnabled(p.Storage) {
+		return
+	}
+	p.logf("%s", formatCamerasDiag(toDiagCameras(cams)))
+}
+
+// diagProbeCamera asks the host for a camera by id and reports the outcome,
+// returning the device so the caller can subscribe to its detection events.
+// Returns nil when unavailable for any reason. Not unit tested: p.API is nil in
+// tests and *sdk.CameraDevice cannot be constructed outside the SDK, so this
+// adapter is verified by the live run instead — which is what the spike is for.
+func (p *NotifyPlugin) diagProbeCamera(cameraID string) *sdk.CameraDevice {
+	if !diagEnabled(p.Storage) || cameraID == "" {
+		return nil
+	}
+	if p.API == nil || p.API.DeviceManager == nil {
+		p.logf("%s getCamera(%q): skipped, no DeviceManager available", diagPrefix, cameraID)
+		return nil
+	}
+	cam, err := p.API.DeviceManager.GetCamera(cameraID)
+	name := ""
+	if cam != nil {
+		name = cam.Name()
+	}
+	p.logf("%s", formatProbeDiag(cameraID, cam != nil, name, err))
+	return cam
+}

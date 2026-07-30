@@ -42,6 +42,8 @@ func NewPlugin(logger *sdk.Logger, api *sdk.PluginAPI, storage *sdk.DeviceStorag
 // no cameras (contract.ts: provides/consumes are both empty) — every
 // camera-lifecycle hook is a no-op.
 func (p *NotifyPlugin) ConfigureCameras(cameras []*sdk.CameraDevice) error {
+	// Spike (#12): record whether the host assigns this plugin any cameras.
+	p.diagCameras(cameras)
 	return nil
 }
 

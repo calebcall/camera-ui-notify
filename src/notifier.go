@@ -149,6 +149,12 @@ func (p *NotifyPlugin) SendNotification(deviceIDs []string, n *sdk.Notification)
 	// is the publisher's notification, not ours.
 	p.diagNotification(n)
 
+	// Spike (#12): can we reach the camera this notification names, even though
+	// no camera is assigned to us?
+	if n != nil {
+		p.diagProbeCamera(n.Data["cameraId"])
+	}
+
 	// base_url is plugin-level config (not per-backend), so it's read once
 	// here rather than threaded into each backend's cfg map. When set, and
 	// the notification's DeepLink is router-relative (as published by
