@@ -122,21 +122,55 @@ func toDiagCameras(cams []*sdk.CameraDevice) []diagCamera {
 	return out
 }
 
-// formatProbeDiag renders the outcome of a GetCamera probe. The three outcomes
-// are spelled out in the message because this single line decides whether the
-// feature needs a per-camera hub assignment or can look cameras up lazily.
-func formatProbeDiag(cameraID string, found bool, name string, err error) string {
+// formatProbeDiag renders the outcome of a GetCamera probe for cameraID,
+// found via the notification Data key matchedKey. The three outcomes are
+// reported as observations, not conclusions: GetCamera checks a local cache
+// first, which ConfigureCameras populates, so an OK result does not by
+// itself prove an *unassigned* camera is reachable — it may be a cache hit
+// on a camera this plugin was assigned (cross-check against question 2's
+// assigned-camera list). Likewise GetCamera can return an error from
+// internal device initialisation that has nothing to do with visibility, so
+// an error does not by itself prove the camera is unreachable.
+func formatProbeDiag(cameraID, matchedKey string, found bool, name string, err error) string {
 	switch {
 	case err != nil:
-		return fmt.Sprintf("%s getCamera(%q): ERROR %v -- unassigned cameras are NOT reachable",
-			diagPrefix, cameraID, err)
+		return fmt.Sprintf("%s getCamera(%q via %s): ERROR %v -- inconclusive: could be visibility, or a device-init failure unrelated to visibility",
+			diagPrefix, cameraID, matchedKey, err)
 	case !found:
-		return fmt.Sprintf("%s getCamera(%q): nil (no error) -- camera not visible to this plugin",
-			diagPrefix, cameraID)
+		return fmt.Sprintf("%s getCamera(%q via %s): nil (no error) -- camera was not returned to this plugin",
+			diagPrefix, cameraID, matchedKey)
 	default:
-		return fmt.Sprintf("%s getCamera(%q): OK name=%q -- unassigned cameras ARE reachable",
-			diagPrefix, cameraID, name)
+		return fmt.Sprintf("%s getCamera(%q via %s): OK name=%q -- reachable, but this may be a ConfigureCameras cache hit rather than proof this camera is unassigned; cross-check against question 2's assigned-camera list",
+			diagPrefix, cameraID, matchedKey, name)
 	}
+}
+
+// diagCameraIDKeys lists the notification Data key spellings this spike
+// tries, in priority order. cameraId is only a guess (pre-existing code in
+// src/backend/deeplink.go relies on it), and the NVR's actual spelling is
+// exactly what question 1 exists to determine, so more than one candidate is
+// tried and the log records which one, if any, matched.
+var diagCameraIDKeys = []string{"cameraId", "cameraID", "camera"}
+
+// findDiagCameraID returns the value and name of the first key in
+// diagCameraIDKeys present in data with a non-empty value. ok is false when
+// none matched, so the caller can say so explicitly instead of silently
+// doing nothing.
+func findDiagCameraID(data map[string]string) (id string, key string, ok bool) {
+	for _, k := range diagCameraIDKeys {
+		if v, present := data[k]; present && v != "" {
+			return v, k, true
+		}
+	}
+	return "", "", false
+}
+
+// formatNoCameraIDDiag reports that none of triedKeys carried a camera id, so
+// the log states the reason questions 3 and 4 produced no further output
+// instead of leaving that to be inferred from silence.
+func formatNoCameraIDDiag(triedKeys []string) string {
+	return fmt.Sprintf("%s getCamera: no camera-id key found in notification Data (tried: %s)",
+		diagPrefix, strings.Join(triedKeys, ", "))
 }
 
 // diagCameras emits the assigned-camera inventory when enabled.
@@ -147,17 +181,25 @@ func (p *NotifyPlugin) diagCameras(cams []*sdk.CameraDevice) {
 	p.logf("%s", formatCamerasDiag(toDiagCameras(cams)))
 }
 
-// diagProbeCamera asks the host for a camera by id and reports the outcome,
-// returning the device so the caller can subscribe to its detection events.
-// Returns nil when unavailable for any reason. Not unit tested: p.API is nil in
-// tests and *sdk.CameraDevice cannot be constructed outside the SDK, so this
-// adapter is verified by the live run instead — which is what the spike is for.
-func (p *NotifyPlugin) diagProbeCamera(cameraID string) *sdk.CameraDevice {
-	if !diagEnabled(p.Storage) || cameraID == "" {
+// diagProbeCamera looks for a camera id under any of diagCameraIDKeys in
+// data, asks the host for that camera, and reports the outcome, returning
+// the device so the caller can subscribe to its detection events. Returns
+// nil when unavailable for any reason — always after logging why. Not unit
+// tested beyond findDiagCameraID: p.API is nil in tests and
+// *sdk.CameraDevice cannot be constructed outside the SDK, so the
+// GetCamera call itself is verified by the live run instead — which is what
+// the spike is for.
+func (p *NotifyPlugin) diagProbeCamera(data map[string]string) *sdk.CameraDevice {
+	if !diagEnabled(p.Storage) {
+		return nil
+	}
+	cameraID, key, ok := findDiagCameraID(data)
+	if !ok {
+		p.logf("%s", formatNoCameraIDDiag(diagCameraIDKeys))
 		return nil
 	}
 	if p.API == nil || p.API.DeviceManager == nil {
-		p.logf("%s getCamera(%q): skipped, no DeviceManager available", diagPrefix, cameraID)
+		p.logf("%s getCamera(%q via %s): skipped, no DeviceManager available", diagPrefix, cameraID, key)
 		return nil
 	}
 	cam, err := p.API.DeviceManager.GetCamera(cameraID)
@@ -165,8 +207,29 @@ func (p *NotifyPlugin) diagProbeCamera(cameraID string) *sdk.CameraDevice {
 	if cam != nil {
 		name = cam.Name()
 	}
-	p.logf("%s", formatProbeDiag(cameraID, cam != nil, name, err))
+	p.logf("%s", formatProbeDiag(cameraID, key, cam != nil, name, err))
 	return cam
+}
+
+// segmentHasSummary reports whether seg carries a non-blank
+// Description.Summary. A non-nil Description with an empty Summary is
+// useless to a notification, so it does not count.
+func segmentHasSummary(seg sdk.EventSegment) bool {
+	return seg.Description != nil && strings.TrimSpace(seg.Description.Summary) != ""
+}
+
+// eventHasSummary reports whether ev carries at least one segment with a
+// non-blank Description.Summary. This is the one predicate shared by
+// formatDetectionDiag (which lists which segments qualify) and diagLogCap's
+// budget gate (which must never drop the message that answers question 4),
+// so the strings.TrimSpace check lives in exactly one place.
+func eventHasSummary(ev sdk.DetectionEvent) bool {
+	for _, seg := range ev.Segments {
+		if segmentHasSummary(seg) {
+			return true
+		}
+	}
+	return false
 }
 
 // formatDetectionDiag renders one detection-event message.
@@ -177,13 +240,16 @@ func (p *NotifyPlugin) diagProbeCamera(cameraID string) *sdk.CameraDevice {
 // timeout default. It is -1 when StartTime is unset, so an unknown elapsed time
 // is never mistaken for a fast one.
 //
-// A segment counts as carrying a description only when Summary is non-blank: a
-// non-nil Description with an empty Summary is useless to a notification, and
-// counting it would overstate availability.
+// msgSegments is the length of this message's own Segments slice, not the
+// event's total segment count: the SDK sends only the current segment on
+// segment-* messages and none on start/end, so this is always 0 or 1 and
+// must not be read as "this event has N segments overall". segmentIndex
+// (ev.SegmentIndex) is reported alongside it so a summary can be pinned to
+// which segment produced it.
 func formatDetectionDiag(eventType sdk.DetectionEventType, ev sdk.DetectionEvent, nowMs int64) string {
 	withSummary := make([]string, 0, len(ev.Segments))
 	for i, seg := range ev.Segments {
-		if seg.Description != nil && strings.TrimSpace(seg.Description.Summary) != "" {
+		if segmentHasSummary(seg) {
 			withSummary = append(withSummary, fmt.Sprintf("%d", i))
 		}
 	}
@@ -194,22 +260,46 @@ func formatDetectionDiag(eventType sdk.DetectionEventType, ev sdk.DetectionEvent
 	}
 
 	return fmt.Sprintf(
-		"%s detectionEvent: type=%s eventId=%q cameraId=%q state=%q segments=%d withSummary=[%s] elapsedMs=%d",
+		"%s detectionEvent: type=%s eventId=%q cameraId=%q state=%q msgSegments=%d segmentIndex=%d withSummary=[%s] elapsedMs=%d",
 		diagPrefix, string(eventType), ev.ID, ev.CameraID, string(ev.State),
-		len(ev.Segments), strings.Join(withSummary, ","), elapsed,
+		len(ev.Segments), ev.SegmentIndex, strings.Join(withSummary, ","), elapsed,
 	)
 }
+
+// formatDetectionBudgetExhaustedDiag renders the one-time notice logged when
+// an event id's line budget runs out, so the log states why messages stopped
+// instead of trailing off into unexplained silence.
+func formatDetectionBudgetExhaustedDiag(eventID string, capacity int) string {
+	return fmt.Sprintf("%s detectionEvent: eventId=%q budget exhausted (cap=%d), suppressing further non-summary messages for this event",
+		diagPrefix, eventID, capacity)
+}
+
+// diagGateAction is what a detection-event message should do, as decided by
+// diagLogCap.decide.
+type diagGateAction int
+
+const (
+	// diagGateSuppress means say nothing: budget is spent and the one-time
+	// notice for this event id has already fired.
+	diagGateSuppress diagGateAction = iota
+	// diagGateLogMessage means log the detection-event line itself.
+	diagGateLogMessage
+	// diagGateLogNotice means log the one-time exhaustion notice instead of
+	// the detection-event line.
+	diagGateLogNotice
+)
 
 // diagLogCap bounds diagnostic lines per event id so a busy camera cannot flood
 // the log during an observation window.
 type diagLogCap struct {
-	mu    sync.Mutex
-	limit int
-	seen  map[string]int
+	mu       sync.Mutex
+	limit    int
+	seen     map[string]int
+	notified map[string]bool
 }
 
 func newDiagLogCap(limit int) *diagLogCap {
-	return &diagLogCap{limit: limit, seen: map[string]int{}}
+	return &diagLogCap{limit: limit, seen: map[string]int{}, notified: map[string]bool{}}
 }
 
 // allow reports whether another line may be emitted for eventID, counting this
@@ -223,6 +313,41 @@ func (c *diagLogCap) allow(eventID string) bool {
 	}
 	c.seen[eventID]++
 	return c.seen[eventID] <= c.limit
+}
+
+// noticeOnce reports true the first time eventID's budget is found
+// exhausted, and false on every call after that for the same eventID — so
+// the caller can log exactly one exhaustion notice per event id, then fall
+// silent.
+func (c *diagLogCap) noticeOnce(eventID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.notified[eventID] {
+		return false
+	}
+	c.notified[eventID] = true
+	return true
+}
+
+// decide applies the summary exemption and the line budget to determine what
+// should happen with one detection-event message. A message whose event
+// carries a non-blank Summary (hasSummary) is always logged and never
+// consumes budget: summary-carrying messages are rare, and the one
+// observation the spike exists to capture must never be the one dropped for
+// running out of budget. Every other message consumes budget as before; once
+// exhausted, decide reports the one-time notice exactly once and suppress
+// after that.
+func (c *diagLogCap) decide(eventID string, hasSummary bool) diagGateAction {
+	if hasSummary {
+		return diagGateLogMessage
+	}
+	if c.allow(eventID) {
+		return diagGateLogMessage
+	}
+	if c.noticeOnce(eventID) {
+		return diagGateLogNotice
+	}
+	return diagGateSuppress
 }
 
 // diagDisposer is the only part of *sdk.Disposable the registry uses. Narrowing
@@ -299,10 +424,20 @@ func (p *NotifyPlugin) diagRT() *diagRuntime {
 	return p.diag
 }
 
+// formatSubscribeDiag confirms a camera's detection-event subscription was
+// registered, in this file's "label: fields" convention.
+func formatSubscribeDiag(cameraID string) string {
+	return fmt.Sprintf("%s subscribe: camera=%q ok", diagPrefix, cameraID)
+}
+
 // diagObserveCamera subscribes to cam's detection events once, logging each
-// message until that event's line budget is spent. Not unit tested: it needs a
-// real *sdk.CameraDevice, which cannot be built outside the SDK. Its two
-// testable halves — the registry and the formatter — are covered separately.
+// message per the diagLogCap gate (formatDetectionDiag while budget or a
+// summary allows it, one exhaustion notice, then silence). diagEnabled is
+// re-checked on every message, not just at subscribe time, so switching the
+// setting off in the UI stops output immediately rather than only on the
+// next plugin restart. Not unit tested: it needs a real *sdk.CameraDevice,
+// which cannot be built outside the SDK. Its testable halves — the
+// registry, the gate, and the formatters — are covered separately.
 func (p *NotifyPlugin) diagObserveCamera(cam *sdk.CameraDevice) {
 	if cam == nil || !diagEnabled(p.Storage) {
 		return
@@ -310,14 +445,19 @@ func (p *NotifyPlugin) diagObserveCamera(cam *sdk.CameraDevice) {
 	rt := p.diagRT()
 
 	disposable := cam.OnDetectionEvent(func(eventType sdk.DetectionEventType, ev sdk.DetectionEvent) {
-		if !rt.cap.allow(ev.ID) {
+		if !diagEnabled(p.Storage) {
 			return
 		}
-		p.logf("%s", formatDetectionDiag(eventType, ev, time.Now().UnixMilli()))
+		switch rt.cap.decide(ev.ID, eventHasSummary(ev)) {
+		case diagGateLogMessage:
+			p.logf("%s", formatDetectionDiag(eventType, ev, time.Now().UnixMilli()))
+		case diagGateLogNotice:
+			p.logf("%s", formatDetectionBudgetExhaustedDiag(ev.ID, diagMaxLinesPerEvent))
+		}
 	})
 
 	if rt.subs.add(cam.ID(), disposable) {
-		p.logf("%s subscribed to detection events for camera %q", diagPrefix, cam.ID())
+		p.logf("%s", formatSubscribeDiag(cam.ID()))
 	}
 }
 

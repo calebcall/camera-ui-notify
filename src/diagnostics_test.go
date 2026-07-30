@@ -123,22 +123,23 @@ func TestFormatProbeDiag(t *testing.T) {
 		{
 			name: "error",
 			err:  errors.New("not permitted"),
-			want: diagPrefix + ` getCamera("cam-1"): ERROR not permitted -- unassigned cameras are NOT reachable`,
+			want: diagPrefix + ` getCamera("cam-1" via cameraId): ERROR not permitted -- inconclusive: could be visibility, or a device-init failure unrelated to visibility`,
 		},
 		{
 			name: "nil result",
-			want: diagPrefix + ` getCamera("cam-1"): nil (no error) -- camera not visible to this plugin`,
+			want: diagPrefix + ` getCamera("cam-1" via cameraId): nil (no error) -- camera was not returned to this plugin`,
 		},
 		{
 			name:  "found",
 			found: true,
 			cname: "Front Door",
-			want:  diagPrefix + ` getCamera("cam-1"): OK name="Front Door" -- unassigned cameras ARE reachable`,
+			want: diagPrefix + ` getCamera("cam-1" via cameraId): OK name="Front Door" -- reachable, but this may be a ` +
+				`ConfigureCameras cache hit rather than proof this camera is unassigned; cross-check against question 2's assigned-camera list`,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := formatProbeDiag("cam-1", tc.found, tc.cname, tc.err)
+			got := formatProbeDiag("cam-1", "cameraId", tc.found, tc.cname, tc.err)
 			if got != tc.want {
 				t.Fatalf("\n got %s\nwant %s", got, tc.want)
 			}
@@ -146,15 +147,58 @@ func TestFormatProbeDiag(t *testing.T) {
 	}
 }
 
+func TestFormatProbeDiag_ReportsMatchedKey(t *testing.T) {
+	got := formatProbeDiag("cam-1", "camera", true, "Front Door", nil)
+	if !strings.Contains(got, "via camera") {
+		t.Fatalf("want the matched key spelling reported, got %s", got)
+	}
+}
+
+func TestFindDiagCameraID(t *testing.T) {
+	tests := []struct {
+		name            string
+		data            map[string]string
+		wantID, wantKey string
+		wantOK          bool
+	}{
+		{"cameraId present", map[string]string{"cameraId": "cam-1"}, "cam-1", "cameraId", true},
+		{"cameraID fallback", map[string]string{"cameraID": "cam-2"}, "cam-2", "cameraID", true},
+		{"camera fallback", map[string]string{"camera": "cam-3"}, "cam-3", "camera", true},
+		{"prefers cameraId over other spellings", map[string]string{"cameraId": "cam-1", "camera": "cam-3"}, "cam-1", "cameraId", true},
+		{"prefers cameraID over camera", map[string]string{"cameraID": "cam-2", "camera": "cam-3"}, "cam-2", "cameraID", true},
+		{"none present", map[string]string{"zone": "Driveway"}, "", "", false},
+		{"blank value not matched", map[string]string{"cameraId": ""}, "", "", false},
+		{"nil map", nil, "", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			id, key, ok := findDiagCameraID(tc.data)
+			if id != tc.wantID || key != tc.wantKey || ok != tc.wantOK {
+				t.Fatalf("findDiagCameraID(%v) = (%q, %q, %t), want (%q, %q, %t)",
+					tc.data, id, key, ok, tc.wantID, tc.wantKey, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestFormatNoCameraIDDiag_NamesTriedKeys(t *testing.T) {
+	got := formatNoCameraIDDiag([]string{"cameraId", "cameraID", "camera"})
+	want := diagPrefix + ` getCamera: no camera-id key found in notification Data (tried: cameraId, cameraID, camera)`
+	if got != want {
+		t.Fatalf("\n got %s\nwant %s", got, want)
+	}
+}
+
 func TestFormatDetectionDiag_NoDescription(t *testing.T) {
 	ev := sdk.DetectionEvent{
 		ID: "evt-1", CameraID: "cam-1", State: sdk.DetectionEventStateActive,
-		StartTime: 1000,
-		Segments:  []sdk.EventSegment{{}},
+		StartTime:    1000,
+		Segments:     []sdk.EventSegment{{}},
+		SegmentIndex: 0,
 	}
 	got := formatDetectionDiag(sdk.DetectionEventSegmentStart, ev, 4000)
 	want := diagPrefix + ` detectionEvent: type=segment-start eventId="evt-1" cameraId="cam-1" ` +
-		`state="active" segments=1 withSummary=[] elapsedMs=3000`
+		`state="active" msgSegments=1 segmentIndex=0 withSummary=[] elapsedMs=3000`
 	if got != want {
 		t.Fatalf("\n got %s\nwant %s", got, want)
 	}
@@ -163,7 +207,8 @@ func TestFormatDetectionDiag_NoDescription(t *testing.T) {
 func TestFormatDetectionDiag_ReportsSegmentsCarryingSummary(t *testing.T) {
 	ev := sdk.DetectionEvent{
 		ID: "evt-2", CameraID: "cam-1", State: sdk.DetectionEventStateActive,
-		StartTime: 1000,
+		StartTime:    1000,
+		SegmentIndex: 4,
 		Segments: []sdk.EventSegment{
 			{},
 			{Description: &sdk.EventDescription{Summary: "A man approached the door."}},
@@ -172,9 +217,68 @@ func TestFormatDetectionDiag_ReportsSegmentsCarryingSummary(t *testing.T) {
 	}
 	got := formatDetectionDiag(sdk.DetectionEventSegmentUpdate, ev, 61000)
 	want := diagPrefix + ` detectionEvent: type=segment-update eventId="evt-2" cameraId="cam-1" ` +
-		`state="active" segments=3 withSummary=[1] elapsedMs=60000`
+		`state="active" msgSegments=3 segmentIndex=4 withSummary=[1] elapsedMs=60000`
 	if got != want {
 		t.Fatalf("\n got %s\nwant %s", got, want)
+	}
+}
+
+func TestSegmentHasSummary(t *testing.T) {
+	tests := []struct {
+		name string
+		seg  sdk.EventSegment
+		want bool
+	}{
+		{"nil description", sdk.EventSegment{}, false},
+		{"blank summary", sdk.EventSegment{Description: &sdk.EventDescription{Summary: "   "}}, false},
+		{"empty summary", sdk.EventSegment{Description: &sdk.EventDescription{Summary: ""}}, false},
+		{"non-blank summary", sdk.EventSegment{Description: &sdk.EventDescription{Summary: "A cat crossed the yard."}}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := segmentHasSummary(tc.seg); got != tc.want {
+				t.Fatalf("segmentHasSummary(%+v) = %t, want %t", tc.seg, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEventHasSummary(t *testing.T) {
+	tests := []struct {
+		name string
+		ev   sdk.DetectionEvent
+		want bool
+	}{
+		{"no segments", sdk.DetectionEvent{}, false},
+		{"only blank summaries", sdk.DetectionEvent{Segments: []sdk.EventSegment{
+			{}, {Description: &sdk.EventDescription{Summary: "  "}},
+		}}, false},
+		{"one non-blank summary among several", sdk.DetectionEvent{Segments: []sdk.EventSegment{
+			{}, {Description: &sdk.EventDescription{Summary: "A man approached."}},
+		}}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := eventHasSummary(tc.ev); got != tc.want {
+				t.Fatalf("eventHasSummary(%+v) = %t, want %t", tc.ev, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatDetectionBudgetExhaustedDiag(t *testing.T) {
+	got := formatDetectionBudgetExhaustedDiag("evt-1", 12)
+	want := diagPrefix + ` detectionEvent: eventId="evt-1" budget exhausted (cap=12), suppressing further non-summary messages for this event`
+	if got != want {
+		t.Fatalf("\n got %s\nwant %s", got, want)
+	}
+}
+
+func TestFormatSubscribeDiag(t *testing.T) {
+	got := formatSubscribeDiag("cam-1")
+	want := diagPrefix + ` subscribe: camera="cam-1" ok`
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
@@ -204,6 +308,57 @@ func TestDiagLogCap_AllowsUpToLimitPerEvent(t *testing.T) {
 func TestDiagLogCap_ZeroLimitDeniesEverything(t *testing.T) {
 	if newDiagLogCap(0).allow("evt-1") {
 		t.Fatal("zero limit allowed a line, want denied")
+	}
+}
+
+func TestDiagLogCap_Decide_SummaryAlwaysLogsAndNeverConsumesBudget(t *testing.T) {
+	c := newDiagLogCap(1)
+	for i := 0; i < 5; i++ {
+		if got := c.decide("evt-1", true); got != diagGateLogMessage {
+			t.Fatalf("summary call %d = %v, want diagGateLogMessage", i, got)
+		}
+	}
+	// The budget for non-summary messages must be untouched: five summary
+	// calls above must not have consumed the single slot.
+	if got := c.decide("evt-1", false); got != diagGateLogMessage {
+		t.Fatalf("first non-summary call after 5 summary calls = %v, want diagGateLogMessage (budget must be untouched)", got)
+	}
+}
+
+func TestDiagLogCap_Decide_ExhaustionNoticeFiresExactlyOnce(t *testing.T) {
+	c := newDiagLogCap(2)
+	if got := c.decide("evt-1", false); got != diagGateLogMessage {
+		t.Fatalf("call 1 = %v, want diagGateLogMessage", got)
+	}
+	if got := c.decide("evt-1", false); got != diagGateLogMessage {
+		t.Fatalf("call 2 = %v, want diagGateLogMessage", got)
+	}
+	if got := c.decide("evt-1", false); got != diagGateLogNotice {
+		t.Fatalf("call 3 (first over budget) = %v, want diagGateLogNotice", got)
+	}
+	if got := c.decide("evt-1", false); got != diagGateSuppress {
+		t.Fatalf("call 4 = %v, want diagGateSuppress (notice already fired)", got)
+	}
+	if got := c.decide("evt-1", false); got != diagGateSuppress {
+		t.Fatalf("call 5 = %v, want diagGateSuppress (notice already fired)", got)
+	}
+}
+
+func TestDiagLogCap_Decide_SummaryLoggedEvenAfterBudgetExhausted(t *testing.T) {
+	c := newDiagLogCap(1)
+	c.decide("evt-1", false) // consumes the only slot
+	c.decide("evt-1", false) // exhausted: fires the notice
+	if got := c.decide("evt-1", true); got != diagGateLogMessage {
+		t.Fatalf("summary message after exhaustion = %v, want diagGateLogMessage: this is the one answer the spike must never drop", got)
+	}
+}
+
+func TestDiagLogCap_Decide_IndependentBudgetsPerEvent(t *testing.T) {
+	c := newDiagLogCap(1)
+	c.decide("evt-1", false)
+	c.decide("evt-1", false) // evt-1 exhausted
+	if got := c.decide("evt-2", false); got != diagGateLogMessage {
+		t.Fatalf("evt-2 first call = %v, want diagGateLogMessage (independent budget from evt-1)", got)
 	}
 }
 

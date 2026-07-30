@@ -152,7 +152,7 @@ func (p *NotifyPlugin) SendNotification(deviceIDs []string, n *sdk.Notification)
 	// Spike (#12): can we reach the camera this notification names, and if so,
 	// what do its detection events carry and when?
 	if n != nil {
-		if cam := p.diagProbeCamera(n.Data["cameraId"]); cam != nil {
+		if cam := p.diagProbeCamera(n.Data); cam != nil {
 			p.diagObserveCamera(cam)
 		}
 	}

@@ -134,7 +134,7 @@ func (p *NotifyPlugin) StorageSchema() []sdk.JsonSchema {
 			Type:        sdk.JsonSchemaTypeBoolean,
 			Key:         "diagnostics",
 			Title:       "Diagnostics (temporary)",
-			Description: "Logs notification payloads and detection events to diagnose AI-description availability. Logs camera and zone names; leave off unless asked to enable it.",
+			Description: "Logs notification payloads and detection events to diagnose AI-description availability. Logs the notification title and every Data value verbatim, which may include detected face or licence-plate labels -- review log output before sharing it (e.g. in a GitHub issue). Leave off unless asked to enable it.",
 			Store:       &storeTrue,
 		},
 	}
