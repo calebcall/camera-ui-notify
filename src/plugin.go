@@ -1,6 +1,8 @@
 package main
 
 import (
+	"sync"
+
 	sdk "github.com/cameraui/sdk/go"
 
 	"github.com/calebcall/camera-ui-notify/src/backend"
@@ -28,14 +30,25 @@ var _ sdk.Plugin = (*NotifyPlugin)(nil)
 // config on every read.
 type NotifyPlugin struct {
 	sdk.BasePlugin
+
+	// Spike (#12) state; remove with src/diagnostics.go.
+	diagOnce sync.Once
+	diag     *diagRuntime
 }
 
 // NewPlugin constructs the plugin. Signature is fixed by sdk.Run's
 // pluginConstructor type (see main.go).
 func NewPlugin(logger *sdk.Logger, api *sdk.PluginAPI, storage *sdk.DeviceStorage) sdk.Plugin {
-	return &NotifyPlugin{
+	p := &NotifyPlugin{
 		BasePlugin: sdk.NewBasePlugin(logger, api, storage),
 	}
+	// Spike (#12): release detection-event subscriptions on teardown.
+	if api != nil {
+		api.On(string(sdk.APIEventShutdown), func(...any) {
+			p.DiagShutdown()
+		})
+	}
+	return p
 }
 
 // ConfigureCameras satisfies sdk.Plugin. Notify is a Hub that attaches to

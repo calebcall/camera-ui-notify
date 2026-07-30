@@ -3,7 +3,9 @@
 // actually observe, so the AI-descriptions design (docs/superpowers/specs/
 // 2026-07-29-ai-descriptions-design.md) rests on measurements instead of
 // guesses. It is deliberately not merged to main. Removal: delete this file,
-// revert the two diag fields on NotifyPlugin, and drop the three call sites.
+// revert the two diag fields on NotifyPlugin, and drop the four call sites:
+// StorageSchema, ConfigureCameras, SendNotification, and the NewPlugin
+// shutdown hook.
 package main
 
 import (
@@ -11,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	sdk "github.com/cameraui/sdk/go"
 )
@@ -220,4 +223,106 @@ func (c *diagLogCap) allow(eventID string) bool {
 	}
 	c.seen[eventID]++
 	return c.seen[eventID] <= c.limit
+}
+
+// diagDisposer is the only part of *sdk.Disposable the registry uses. Narrowing
+// to it makes the registry testable without SDK internals.
+type diagDisposer interface{ Dispose() }
+
+// diagSubscriptions tracks one detection-event subscription per camera id.
+type diagSubscriptions struct {
+	mu   sync.Mutex
+	subs map[string]diagDisposer
+}
+
+func newDiagSubscriptions() *diagSubscriptions {
+	return &diagSubscriptions{subs: map[string]diagDisposer{}}
+}
+
+// add registers d for cameraID and reports whether it was stored. A duplicate
+// is refused AND disposed immediately: the caller has already created a live
+// subscription by then, so dropping it on the floor would leak it.
+func (s *diagSubscriptions) add(cameraID string, d diagDisposer) bool {
+	if d == nil {
+		return false
+	}
+	s.mu.Lock()
+	if _, exists := s.subs[cameraID]; exists {
+		s.mu.Unlock()
+		d.Dispose()
+		return false
+	}
+	s.subs[cameraID] = d
+	s.mu.Unlock()
+	return true
+}
+
+func (s *diagSubscriptions) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.subs)
+}
+
+// disposeAll releases every subscription and empties the registry, so calling
+// it twice is safe.
+func (s *diagSubscriptions) disposeAll() {
+	s.mu.Lock()
+	subs := make([]diagDisposer, 0, len(s.subs))
+	for _, d := range s.subs {
+		subs = append(subs, d)
+	}
+	s.subs = map[string]diagDisposer{}
+	s.mu.Unlock()
+
+	for _, d := range subs {
+		d.Dispose()
+	}
+}
+
+// diagRuntime holds the spike's mutable state.
+type diagRuntime struct {
+	cap  *diagLogCap
+	subs *diagSubscriptions
+}
+
+// diagRT lazily builds the runtime. Lazy because tests construct NotifyPlugin as
+// a bare struct literal (see newTestPlugin) and never call NewPlugin, so a
+// constructor-initialised field would be nil in exactly the code paths tests
+// exercise.
+func (p *NotifyPlugin) diagRT() *diagRuntime {
+	p.diagOnce.Do(func() {
+		p.diag = &diagRuntime{
+			cap:  newDiagLogCap(diagMaxLinesPerEvent),
+			subs: newDiagSubscriptions(),
+		}
+	})
+	return p.diag
+}
+
+// diagObserveCamera subscribes to cam's detection events once, logging each
+// message until that event's line budget is spent. Not unit tested: it needs a
+// real *sdk.CameraDevice, which cannot be built outside the SDK. Its two
+// testable halves — the registry and the formatter — are covered separately.
+func (p *NotifyPlugin) diagObserveCamera(cam *sdk.CameraDevice) {
+	if cam == nil || !diagEnabled(p.Storage) {
+		return
+	}
+	rt := p.diagRT()
+
+	disposable := cam.OnDetectionEvent(func(eventType sdk.DetectionEventType, ev sdk.DetectionEvent) {
+		if !rt.cap.allow(ev.ID) {
+			return
+		}
+		p.logf("%s", formatDetectionDiag(eventType, ev, time.Now().UnixMilli()))
+	})
+
+	if rt.subs.add(cam.ID(), disposable) {
+		p.logf("%s subscribed to detection events for camera %q", diagPrefix, cam.ID())
+	}
+}
+
+// DiagShutdown releases every subscription. Wired to APIEventShutdown so the
+// spike leaves nothing running when the host tears the plugin down.
+func (p *NotifyPlugin) DiagShutdown() {
+	p.diagRT().subs.disposeAll()
 }

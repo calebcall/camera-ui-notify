@@ -206,3 +206,57 @@ func TestDiagLogCap_ZeroLimitDeniesEverything(t *testing.T) {
 		t.Fatal("zero limit allowed a line, want denied")
 	}
 }
+
+// fakeDisposer records whether Dispose was called, standing in for
+// *sdk.Disposable (which the registry only ever calls Dispose on).
+type fakeDisposer struct{ disposed int }
+
+func (f *fakeDisposer) Dispose() { f.disposed++ }
+
+func TestDiagSubscriptions_AddIsIdempotentPerCamera(t *testing.T) {
+	s := newDiagSubscriptions()
+	first, second := &fakeDisposer{}, &fakeDisposer{}
+
+	if !s.add("cam-1", first) {
+		t.Fatal("first add for cam-1 returned false, want true")
+	}
+	if s.add("cam-1", second) {
+		t.Fatal("second add for cam-1 returned true, want false (already subscribed)")
+	}
+	if s.count() != 1 {
+		t.Fatalf("count = %d, want 1", s.count())
+	}
+	if second.disposed != 1 {
+		t.Fatalf("rejected duplicate was disposed %d times, want 1 (must not leak)", second.disposed)
+	}
+}
+
+func TestDiagSubscriptions_DisposeAll(t *testing.T) {
+	s := newDiagSubscriptions()
+	a, b := &fakeDisposer{}, &fakeDisposer{}
+	s.add("cam-1", a)
+	s.add("cam-2", b)
+
+	s.disposeAll()
+
+	if a.disposed != 1 || b.disposed != 1 {
+		t.Fatalf("disposed counts = %d/%d, want 1/1", a.disposed, b.disposed)
+	}
+	if s.count() != 0 {
+		t.Fatalf("count after disposeAll = %d, want 0", s.count())
+	}
+	s.disposeAll() // must be safe twice
+	if a.disposed != 1 {
+		t.Fatalf("second disposeAll re-disposed: %d, want 1", a.disposed)
+	}
+}
+
+func TestDiagSubscriptions_IgnoresNil(t *testing.T) {
+	s := newDiagSubscriptions()
+	if s.add("cam-1", nil) {
+		t.Fatal("add with nil disposer returned true, want false")
+	}
+	if s.count() != 0 {
+		t.Fatalf("count = %d, want 0", s.count())
+	}
+}
