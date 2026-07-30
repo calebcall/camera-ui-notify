@@ -2,7 +2,7 @@ module github.com/calebcall/camera-ui-notify
 
 go 1.26.3
 
-require github.com/cameraui/sdk/go v1.1.11
+require github.com/cameraui/sdk/go v1.1.18
 
 require (
 	github.com/cameraui/rpc/go v1.0.6 // indirect
