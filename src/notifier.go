@@ -144,6 +144,11 @@ func (p *NotifyPlugin) SendNotification(deviceIDs []string, n *sdk.Notification)
 	p.logf("notify: sendNotification for %d device(s): title=%q severity=%q hasThumbnail=%t imageUrl=%t deepLink=%t",
 		len(deviceIDs), n.Title, n.Severity, len(n.Thumbnail) > 0, n.ImageURL != "", n.DeepLink != "")
 
+	// Spike (#12): observe the payload the publisher actually sent, before any
+	// of our own rewriting. Placed before toSend is derived so what is logged
+	// is the publisher's notification, not ours.
+	p.diagNotification(n)
+
 	// base_url is plugin-level config (not per-backend), so it's read once
 	// here rather than threaded into each backend's cfg map. When set, and
 	// the notification's DeepLink is router-relative (as published by

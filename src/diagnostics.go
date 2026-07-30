@@ -7,6 +7,10 @@
 package main
 
 import (
+	"fmt"
+	"sort"
+	"strings"
+
 	sdk "github.com/cameraui/sdk/go"
 )
 
@@ -34,4 +38,44 @@ func diagEnabled(s *sdk.DeviceStorage) bool {
 	default:
 		return false
 	}
+}
+
+// formatNotificationDiag renders one notification's shape as a single line.
+//
+// Data keys are sorted because Go randomises map iteration order: without
+// sorting, the same notification would render differently run to run, the test
+// could not assert on the output, and two log lines could not be compared by
+// eye. Values are quoted with %q so an empty string is distinguishable from a
+// missing key — which is the whole point of question 1.
+func formatNotificationDiag(n *sdk.Notification) string {
+	if n == nil {
+		return diagPrefix + " notification: <nil>"
+	}
+
+	keys := make([]string, 0, len(n.Data))
+	for k := range n.Data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	pairs := make([]string, 0, len(keys))
+	for _, k := range keys {
+		pairs = append(pairs, fmt.Sprintf("%s=%q", k, n.Data[k]))
+	}
+
+	return fmt.Sprintf(
+		"%s notification: title=%q tag=%q severity=%q deepLink=%q bodyLen=%d hasThumbnail=%t hasImageURL=%t dataKeys=%d data{%s}",
+		diagPrefix, n.Title, n.Tag, string(n.Severity), n.DeepLink,
+		len(n.Body), len(n.Thumbnail) > 0, n.ImageURL != "",
+		len(n.Data), strings.Join(pairs, " "),
+	)
+}
+
+// diagNotification emits the notification diagnostic when enabled. Read-only:
+// it never touches the notification it is handed.
+func (p *NotifyPlugin) diagNotification(n *sdk.Notification) {
+	if !diagEnabled(p.Storage) {
+		return
+	}
+	p.logf("%s", formatNotificationDiag(n))
 }
