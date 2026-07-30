@@ -115,6 +115,13 @@ func (p *NotifyPlugin) StorageSchema() []sdk.JsonSchema {
 			Description: "Optional. Used to turn camera.ui's relative deep links into absolute tap-through URLs (e.g. ntfy Click).",
 			Store:       &storeTrue,
 		},
+		{
+			Type:        sdk.JsonSchemaTypeBoolean,
+			Key:         "diagnostics",
+			Title:       "Diagnostics (temporary)",
+			Description: "Logs notification payloads and detection events to diagnose AI-description availability. Logs camera and zone names; leave off unless asked to enable it.",
+			Store:       &storeTrue,
+		},
 	}
 
 	for _, b := range backends {
