@@ -5,6 +5,18 @@ All notable changes to **Notify** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-07-29
+
+### Changed
+
+- **Go SDK pinned to `v1.1.18`** (from `v1.1.11`) — routine catch-up ahead of camera.ui's upcoming sensor
+  refactor, which makes sensors standalone devices and deprecates the camera-bound sensor registration
+  functions (`CameraDevice.AddSensor`/`GetSensor`/`GetSensors`/`GetSensorsByType`). Notify calls none of
+  those and declares `provides: []`/`consumes: []`, so no source change was required; catching up now
+  keeps any future breakage attributable to one change rather than to seven versions plus a refactor.
+  No behaviour change — the `NotifierInterface`, `Notification` and `NotifierDevice` types are identical
+  between the two SDK versions.
+
 ## [0.5.2] - 2026-07-26
 
 ### Fixed
