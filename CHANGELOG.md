@@ -5,6 +5,50 @@ All notable changes to **Notify** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-07-31
+
+### Changed
+
+- **Go SDK pinned to `v1.2.4`** (from `v1.1.18`) — this is the SDK half of camera.ui's standalone-sensor
+  refactor, released 30 minutes before `server-v2.0.23`. The diff rewrites `camera_device.go`, the whole
+  `sensor_*` family, `plugin_contract.go`, `plugin_notifier.go` and `plugin_interfaces.go`, and adds
+  `manager_sensor.go` and `observable.go`. Notify required **no source change**: it declares
+  `provides: []`/`consumes: []`, owns no cameras, and touches none of the camera-bound sensor
+  registration functions the refactor removed. `NotifierInterface`, `Notification` and `NotifierDevice`
+  remain compatible, and the detection-event types used by the diagnostics path still resolve.
+- **Minimum camera.ui raised to `2.0.23`** (from `2.0.15`) — `server-v2.0.23` is the release that landed
+  the new sensor system and, per its own notes, stops honouring plugins built against the old one. Since
+  this version of Notify ships an SDK v1.2.4 binary, a pre-2.0.23 server would be pairing a new plugin
+  wire protocol with a host that predates it. The server enforces this floor through
+  `checkEngineCompatibility` at install time, so affected users simply stay on 0.5.3 instead of
+  installing a build their host can't speak.
+- **`@camera.ui/cli` `~0.0.73`** (from `~0.0.65`) — the CLI now emits one npm package per platform target
+  under `bundle/platforms/` and records them as `optionalDependencies` in the plugin's own
+  `package.json` (hence the new block here). npm installs only the entry matching the host's
+  `os`/`cpu`/`libc` and the server executes that binary in place, so nothing depends on an install-time
+  lifecycle script — which npm v12 disables for dependencies by default. `cui publish` publishes each
+  platform package before the root one and keeps the versions in lockstep. The set of published package
+  names is unchanged, so the Trusted Publishing setup in `PUBLISHING.md` still applies as written.
+- **`@camera.ui/sdk` `~1.2.3`** (from `~0.0.22`) — required, not optional: `@camera.ui/cli@0.0.73`
+  itself depends on `@camera.ui/sdk@~1.2.3`. Despite the major-version jump this is a no-op for
+  `contract.ts`; `PluginRole.Hub` (`'hub'`) and `PluginInterface.Notifier` (`'Notifier'`) keep their
+  identifiers and values, and the contract still type-checks and passes `cui bundle`'s validation.
+- **`@types/node` `^26.1.2`**, **`updates` `^17.20.2`** — routine. `cross-env` and `rimraf` were already
+  current.
+- **Transitive Go dependencies refreshed** — `github.com/cameraui/rpc/go` v1.0.7, `klauspost/compress`
+  v1.19.1, `nats-io/nkeys` v0.4.16, `golang.org/x/crypto` v0.54.0, `golang.org/x/sys` v0.47.0.
+
+### Notes
+
+- **`typescript` stays pinned at `5.9.3`** even though 7.0.2 is published. `@camera.ui/cli` loads
+  `cameraui.config.ts` through `ts-import@5.0.0-beta.1`, which declares `peerDependencies:
+  { typescript: "5" }`. 5.9.3 is the newest 5.x, so the existing exact pin is already correct and
+  deliberate; moving to 6 or 7 would break `cui bundle`.
+- Verified end to end: `go build ./src/...`, `go test ./...` (both packages pass), and `npm run bundle`
+  cross-compiling all 8 platform targets with contract validation. `staticcheck` (43 findings) and
+  `golangci-lint` (9 findings) return byte-identical counts before and after the upgrade — all
+  pre-existing, tracked in #14.
+
 ## [0.5.3] - 2026-07-29
 
 ### Changed
