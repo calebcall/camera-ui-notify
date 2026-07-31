@@ -52,15 +52,5 @@
     "url": "git+https://github.com/calebcall/camera-ui-notify.git"
   },
   "os": [],
-  "cpu": [],
-  "optionalDependencies": {
-    "@calebcall/camera-ui-notify-darwin-arm64": "0.5.4",
-    "@calebcall/camera-ui-notify-darwin-amd64": "0.5.4",
-    "@calebcall/camera-ui-notify-linux-amd64": "0.5.4",
-    "@calebcall/camera-ui-notify-linux-arm64": "0.5.4",
-    "@calebcall/camera-ui-notify-windows-amd64": "0.5.4",
-    "@calebcall/camera-ui-notify-windows-arm64": "0.5.4",
-    "@calebcall/camera-ui-notify-linux-amd64-musl": "0.5.4",
-    "@calebcall/camera-ui-notify-linux-arm64-musl": "0.5.4"
-  }
+  "cpu": []
 }

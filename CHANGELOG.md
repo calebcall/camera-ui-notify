@@ -23,12 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `checkEngineCompatibility` at install time, so affected users simply stay on 0.5.3 instead of
   installing a build their host can't speak.
 - **`@camera.ui/cli` `~0.0.73`** (from `~0.0.65`) — the CLI now emits one npm package per platform target
-  under `bundle/platforms/` and records them as `optionalDependencies` in the plugin's own
-  `package.json` (hence the new block here). npm installs only the entry matching the host's
-  `os`/`cpu`/`libc` and the server executes that binary in place, so nothing depends on an install-time
-  lifecycle script — which npm v12 disables for dependencies by default. `cui publish` publishes each
-  platform package before the root one and keeps the versions in lockstep. The set of published package
-  names is unchanged, so the Trusted Publishing setup in `PUBLISHING.md` still applies as written.
+  under `bundle/platforms/` and records them as `optionalDependencies` in the published bundle. npm
+  installs only the entry matching the host's `os`/`cpu`/`libc` and the server executes that binary in
+  place, so nothing depends on an install-time lifecycle script — which npm v12 disables for
+  dependencies by default. `cui publish` publishes each platform package before the root one and keeps
+  the versions in lockstep. The set of published package names is unchanged, so the Trusted Publishing
+  setup in `PUBLISHING.md` still applies as written. Note that `npm run bundle` also writes that block
+  into the repo's own `package.json`; it must not be committed (it would break `npm ci`), see #16 and
+  the new section in `PUBLISHING.md`.
 - **`@camera.ui/sdk` `~1.2.3`** (from `~0.0.22`) — required, not optional: `@camera.ui/cli@0.0.73`
   itself depends on `@camera.ui/sdk@~1.2.3`. Despite the major-version jump this is a no-op for
   `contract.ts`; `PluginRole.Hub` (`'hub'`) and `PluginInterface.Notifier` (`'Notifier'`) keep their

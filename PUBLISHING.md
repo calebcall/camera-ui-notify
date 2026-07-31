@@ -50,6 +50,30 @@ identity is trusted, and npm records a provenance attestation for each package.
 4. The `publish` workflow builds all platforms and publishes them to npm under
    `latest`. (It fails fast if the tag doesn't match `package.json` version.)
 
+## Never commit the `optionalDependencies` block
+
+`npm run bundle` (as of `@camera.ui/cli` 0.0.73) writes an `optionalDependencies`
+block naming the eight per-platform packages into the **root `package.json`**, so
+your working tree comes back dirty after every local bundle. **Discard that hunk —
+do not commit it:**
+
+```bash
+git checkout -- package.json     # after a local `npm run bundle`
+```
+
+It pins the platform packages at the version being released, and that version
+does not exist on npm until the release publishes it, so `package-lock.json` can
+never hold a matching entry. Committing the block makes `npm ci` fail with
+`Missing: @calebcall/camera-ui-notify-<platform>@ from lock file`, which breaks the
+`publish` workflow at its "Install dependencies" step (see #16).
+
+Nothing is lost by dropping it. `cui publish` reads only `bundle/package.json`, and
+`cui bundle` regenerates that file's `optionalDependencies` from the configured Go
+targets on every run — so the **published** package still resolves the correct
+per-platform binary. In CI the ordering makes the re-write harmless: `npm ci` runs
+against the clean `package.json`, then `npm run bundle` re-adds the block into a
+throwaway checkout.
+
 ## Dry run (manual)
 
 To exercise the build/cross-compile/bundle path **without publishing** (e.g. to
