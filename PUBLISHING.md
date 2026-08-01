@@ -50,29 +50,25 @@ identity is trusted, and npm records a provenance attestation for each package.
 4. The `publish` workflow builds all platforms and publishes them to npm under
    `latest`. (It fails fast if the tag doesn't match `package.json` version.)
 
-## Never commit the `optionalDependencies` block
+## Where `optionalDependencies` comes from
 
-`npm run bundle` (as of `@camera.ui/cli` 0.0.73) writes an `optionalDependencies`
-block naming the eight per-platform packages into the **root `package.json`**, so
-your working tree comes back dirty after every local bundle. **Discard that hunk —
-do not commit it:**
+The published package carries an `optionalDependencies` block naming the eight
+per-platform packages, so npm installs only the binary matching the host's
+`os`/`cpu`/`libc`. That block lives **only** in `bundle/package.json`, which
+`cui bundle` regenerates from the Go targets in `cameraui.config.ts` on every run.
+The repo's own `package.json` must not contain it: the entries would pin a version
+that doesn't exist on npm until the release publishes it, so `package-lock.json`
+could never resolve them and `npm ci` would fail with
+`Missing: @calebcall/camera-ui-notify-<platform>@ from lock file` — breaking the
+`publish` workflow at its "Install dependencies" step.
 
-```bash
-git checkout -- package.json     # after a local `npm run bundle`
-```
-
-It pins the platform packages at the version being released, and that version
-does not exist on npm until the release publishes it, so `package-lock.json` can
-never hold a matching entry. Committing the block makes `npm ci` fail with
-`Missing: @calebcall/camera-ui-notify-<platform>@ from lock file`, which breaks the
-`publish` workflow at its "Install dependencies" step (see #16).
-
-Nothing is lost by dropping it. `cui publish` reads only `bundle/package.json`, and
-`cui bundle` regenerates that file's `optionalDependencies` from the configured Go
-targets on every run — so the **published** package still resolves the correct
-per-platform binary. In CI the ordering makes the re-write harmless: `npm ci` runs
-against the clean `package.json`, then `npm run bundle` re-adds the block into a
-throwaway checkout.
+`@camera.ui/cli` 0.0.73 and 0.0.74 wrote that block into the repo's `package.json`
+on every bundle, which caused exactly that failure (#16, reported upstream as
+[cameraui/cli#31](https://github.com/cameraui/cli/issues/31)). **Fixed in
+`@camera.ui/cli` 0.0.75** — `cui bundle` no longer touches the repo's
+`package.json`, so no cleanup step is needed. If a future CLI regresses this, the
+symptom is a dirty `package.json` after `npm run bundle`; discard it with
+`git checkout -- package.json` and don't commit it.
 
 ## Dry run (manual)
 

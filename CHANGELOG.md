@@ -5,6 +5,28 @@ All notable changes to **Notify** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6] - 2026-08-01
+
+### Changed
+
+- **`@camera.ui/cli` `~0.0.75`** (from `~0.0.74`) — picks up the fix for the bug this project reported
+  upstream as [cameraui/cli#31](https://github.com/cameraui/cli/issues/31) (tracked here as #16):
+  `cui bundle` was writing an `optionalDependencies` block into the plugin repo's own `package.json` on
+  every run, pinned to a version that does not exist on npm until the release publishes it — so
+  `package-lock.json` could never resolve it and `npm ci` failed, breaking the release workflow at its
+  "Install dependencies" step. 0.0.75 stops touching the repo's `package.json` entirely, which also
+  removes the merge-vs-replace inconsistency and the whole-file reformatting reported alongside it.
+  Verified: `package.json` is byte-identical before and after `npm run bundle`, and the published bundle
+  still carries all 8 platform `optionalDependencies` at the right version.
+- **`PUBLISHING.md`** — replaced the "Never commit the `optionalDependencies` block" workaround with a
+  short explanation of where that block legitimately comes from (`bundle/package.json`, regenerated from
+  the Go targets each run) and why it must not appear in the repo's own `package.json`, noting the CLI
+  versions affected and that 0.0.75 fixes it.
+
+No change to the plugin itself — this release is build tooling and documentation only, and the published
+artifact is functionally identical to 0.5.5. Every other dependency was already current: `@camera.ui/sdk`
+1.2.3, `github.com/cameraui/sdk/go` v1.2.6, `github.com/cameraui/rpc/go` v1.0.7, camera.ui floor 2.0.24.
+
 ## [0.5.5] - 2026-08-01
 
 ### Changed
