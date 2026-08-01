@@ -5,6 +5,37 @@ All notable changes to **Notify** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] - 2026-08-01
+
+### Changed
+
+- **Go SDK pinned to `v1.2.6`** (from `v1.2.4`) — routine catch-up on two upstream patches. No source
+  change required; `go build`, `go test` and the full 8-target bundle all pass untouched.
+- **`@camera.ui/cli` `~0.0.74`** (from `~0.0.73`) — routine. Still writes an `optionalDependencies` block
+  into the repo's own `package.json` on every bundle, so the `PUBLISHING.md` guidance from #16 continues
+  to apply: discard that hunk, never commit it.
+- **Minimum camera.ui raised to `2.0.24`** (from `2.0.23`) — 2.0.24 carries three host-side fixes that
+  directly affect plugin settings: panels getting permanently stuck on "No configuration available" when
+  a settings request was superseded, a camera's plugin toggle deleting that plugin's stored per-camera
+  settings, and cleared settings becoming `undefined` instead of falling back to their default. The
+  plugin wire protocol is unchanged from 2.0.23 (`protocolLevel` is still 1), so this floor is about
+  guaranteeing Notify's own configuration behaves, not about protocol compatibility.
+- **`typescript` `7.0.2`** (from `5.9.3`) — moves off the 5.x line onto the native compiler. Safe here
+  because npm nests `typescript@5.9.3` under `@camera.ui/cli`'s copy of `ts-import`, which still declares
+  `peerDependencies: { typescript: "5" }`; the CLI's `cameraui.config.ts` loader therefore keeps running
+  on TS 5 while the repo's own pin moves to 7. Verified: `cui bundle` still bundles and validates the
+  contract, and `contract.ts`/`cameraui.config.ts` type-check clean under 7.0.2. Two consequences worth
+  knowing: `node_modules` now holds two TypeScript installs, and because TS 7 ships as a native binary
+  the lockfile gains 20 optional `@typescript/typescript-<platform>` packages (only the host's own is
+  installed). Nothing in the build consumes the root pin — there is no `tsconfig.json` and no `tsc` in
+  any script — so it serves ad-hoc type-checking only.
+
+### Fixed
+
+- **`package-lock.json` now records the correct version** — it still said `0.5.3` through the 0.5.4
+  release because the lockfile was last written before that version bump. Harmless (npm does not publish
+  from it) but misleading; regenerated here.
+
 ## [0.5.4] - 2026-07-31
 
 ### Changed
