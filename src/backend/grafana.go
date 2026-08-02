@@ -65,6 +65,7 @@ func newGrafana() *grafana {
 		modes: []grafanaMode{
 			newGrafanaAnnotations(),
 			newGrafanaAlerts(),
+			newGrafanaIRM(),
 		},
 	}
 }
