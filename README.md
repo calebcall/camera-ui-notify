@@ -3,7 +3,8 @@
 <p align="center">
   A fully-local, multi-backend <a href="https://github.com/seydx/camera.ui">camera.ui</a> notifier
   plugin — delivers notifications to a service you control (<a href="https://ntfy.sh">ntfy</a>,
-  <a href="https://gotify.net">Gotify</a>, Pushover, Telegram, Discord, or a generic webhook).
+  <a href="https://gotify.net">Gotify</a>, Pushover, Telegram, Discord,
+  <a href="https://grafana.com">Grafana</a>, or a generic webhook).
 </p>
 
 ---
@@ -32,7 +33,7 @@ Adding a new backend later is **one new file** — `src/backend/<name>.go` imple
 
 ## Backends (v1)
 
-Severity is mapped consistently across backends via `backend.PriorityScale`, which spreads camera.ui's four severity levels (`info` → `warn` → `error` → `critical`) evenly across each backend's native priority range, `info` at the low end and `critical` at the high end.
+Severity is mapped consistently across backends via `backend.PriorityScale`, which spreads camera.ui's four severity levels (`info` → `warn` → `error` → `critical`) evenly across each backend's native priority range, `info` at the low end and `critical` at the high end. Grafana is the exception: no Grafana surface has a numeric priority, so severity travels verbatim as a label/tag.
 
 ### ntfy
 
@@ -102,8 +103,44 @@ Delivers to a channel via a Discord [webhook](https://support.discord.com/hc/en-
 
 Delivery: a rich embed (title, body, severity color — blue/yellow/red) with the snapshot **image** attached; an absolute deep link makes the title a link.
 
+### Grafana
+
+Delivers to a [Grafana](https://grafana.com) instance. Grafana is not one ingest endpoint, so a
+**Mode** field selects which surface receives the notification.
+
+| Field                   | Required | Mode                    | Notes                                                    |
+| ----------------------- | -------- | ----------------------- | --------------------------------------------------------- |
+| `grafana_mode`          | yes      | —                       | `annotations`, `alerts`, or `irm`. Defaults to `annotations`. |
+| `grafana_server`        | yes      | annotations, alerts     | Base URL of the Grafana instance. Trailing `/` trimmed.   |
+| `grafana_token`         | yes      | annotations, alerts     | Service-account token, sent as `Authorization: Bearer <token>`. |
+| `grafana_tags`          | no       | annotations             | Comma-separated extra tags.                               |
+| `grafana_alertname`     | no       | alerts                  | `alertname` label. Defaults to `CameraUINotification`.    |
+| `grafana_ttl`           | no       | alerts                  | Seconds before Grafana auto-resolves the alert. Default `300`, minimum `30`. |
+| `grafana_irm_url`       | yes      | irm                     | Inbound webhook URL of an IRM / OnCall integration. The token is in the URL, so it is masked and kept out of every error message. |
+
+**Annotations** — `POST {server}/api/annotations` with a point-in-time, organization-wide
+annotation tagged `camera.ui`, `camera:<id>`, `severity:<level>`, plus your extra tags. Surface it
+on a dashboard with an annotation query filtered on the `camera.ui` tag; that survives dashboard
+renames, which pinning to a dashboard UID would not. The tooltip text carries the title, the body,
+and — when `base_url` is set — a link back to camera.ui.
+
+**Alerts** — `POST {server}/api/alertmanager/grafana/api/v2/alerts`, so your existing notification
+policies route the event. `endsAt` is `startsAt + grafana_ttl`, which lets Grafana auto-resolve the
+alert without a second request. Labels are `alertname`, `source=camera.ui`, `severity` (camera.ui's
+own four levels, verbatim), `camera`, and a unique `event_id` — the last of these matters, because
+Alertmanager deduplicates on the label set and without it two detections on one camera inside the
+TTL window would collapse into a single alert. The absolute deep link becomes `generatorURL`,
+which Grafana shows as **Source**.
+
+**IRM** — `POST {integration URL}` using Grafana IRM / OnCall's formatted-webhook fields
+(`alert_uid`, `title`, `message`, `image_url`, `link_to_upstream_details`, `state=alerting`), one
+alert group per event.
+
 > **Images:** ntfy, Pushover, Telegram, and Discord all render the detection snapshot. Gotify is
 > text + link only (it needs a hosted image URL, which this fully-local plugin doesn't provide).
+> Grafana renders one only in IRM mode, and only when the publisher supplied a hosted `ImageURL` —
+> annotations have no image field at all, and alerts carry the URL as an `image_url` annotation
+> that Grafana itself won't render but downstream notification templates can use.
 
 > **Secrets in logs:** transport failures never log the bot token / webhook URL / other
 > URL-embedded secret — request URLs are redacted from delivery errors.
@@ -113,7 +150,7 @@ Delivery: a rich embed (title, body, severity color — blue/yellow/red) with th
 There is no "add device" flow. Instead, configure the plugin itself:
 
 1. Open the **Notify** plugin's page in camera.ui (Plugins → Notify).
-2. In its settings, pick a **Service** (`ntfy`, `Gotify`, `Generic webhook`, `Pushover`, `Telegram`, or `Discord`) from the dropdown built from the registered backends.
+2. In its settings, pick a **Service** (`ntfy`, `Gotify`, `Generic webhook`, `Pushover`, `Telegram`, `Discord`, or `Grafana`) from the dropdown built from the registered backends.
 3. Fill in that service's fields — only the selected service's fields are shown; the rest are condition-gated out.
 4. Save. The config is validated (`ParseTarget`) the next time a notification is dispatched; `getDevices` then synthesizes one delivery target from it, and notifications from any publisher are delivered there.
 
