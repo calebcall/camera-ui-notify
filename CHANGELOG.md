@@ -5,6 +5,14 @@ All notable changes to **Notify** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`package.json` description now lists every backend.** It had said "ntfy, Gotify, or a generic
+  webhook" since 0.4.0, omitting Pushover, Telegram, Discord and Grafana. This is the text npm
+  shows on the package listing. ([#29](https://github.com/calebcall/camera-ui-notify/issues/29))
+
 ## [0.7.1] - 2026-08-02
 
 ### Fixed
