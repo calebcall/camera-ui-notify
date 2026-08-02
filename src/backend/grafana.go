@@ -64,6 +64,7 @@ func newGrafana() *grafana {
 		client: &http.Client{Timeout: 10 * time.Second},
 		modes: []grafanaMode{
 			newGrafanaAnnotations(),
+			newGrafanaAlerts(),
 		},
 	}
 }
