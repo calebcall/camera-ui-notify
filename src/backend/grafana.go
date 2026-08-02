@@ -62,7 +62,9 @@ type grafana struct {
 func newGrafana() *grafana {
 	return &grafana{
 		client: &http.Client{Timeout: 10 * time.Second},
-		modes:  []grafanaMode{},
+		modes: []grafanaMode{
+			newGrafanaAnnotations(),
+		},
 	}
 }
 
