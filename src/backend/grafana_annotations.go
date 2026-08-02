@@ -77,7 +77,7 @@ func (a *grafanaAnnotations) send(ctx context.Context, client *http.Client, cfg 
 // cannot produce an empty tag.
 func grafanaAnnotationTags(extra string, notif sdk.Notification) []string {
 	tags := []string{"camera.ui"}
-	if cam := grafanaCameraID(notif); cam != "" {
+	if cam := grafanaCameraLabel(notif); cam != "" {
 		tags = append(tags, "camera:"+cam)
 	}
 	tags = append(tags, "severity:"+grafanaSeverity(notif))

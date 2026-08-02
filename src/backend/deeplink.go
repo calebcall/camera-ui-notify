@@ -67,11 +67,35 @@ func deepLinkPath(deepLink string) string {
 // under a sub-path ("/camera-ui/cameras/cam-1"), and requiring the trailing
 // id keeps the camera *list* page ("/cameras") out.
 func pathTargetsCamera(path string) bool {
+	return cameraPathSegment(path) != ""
+}
+
+// DeepLinkCameraSegment returns the camera-identifying segment of notif's
+// deep link — the part after "cameras/" — or "" when the link names no
+// specific camera.
+//
+// camera.ui routes cameras by their display name, so for a detection this is
+// the human-readable name ("Patio") while Data["cameraId"] is a UUID. That
+// makes it the cheapest source of a readable camera label: no RPC, no camera
+// lookup, and it works for any publisher that emits a camera deep link.
+// url.Parse has already percent-decoded the path, so a name with spaces
+// arrives intact.
+func DeepLinkCameraSegment(notif sdk.Notification) string {
+	return cameraPathSegment(deepLinkPath(notif.DeepLink))
+}
+
+// cameraPathSegment extracts the segment following "cameras" in path, or ""
+// when there is none. Shared by pathTargetsCamera and DeepLinkCameraSegment
+// so "does this address a camera" and "which camera" cannot drift apart.
+func cameraPathSegment(path string) string {
 	segments := strings.Split(strings.Trim(path, "/"), "/")
 	for i, seg := range segments {
 		if seg == "cameras" {
-			return i+1 < len(segments) && segments[i+1] != ""
+			if i+1 < len(segments) {
+				return segments[i+1]
+			}
+			return ""
 		}
 	}
-	return false
+	return ""
 }

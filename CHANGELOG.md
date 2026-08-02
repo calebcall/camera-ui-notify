@@ -41,8 +41,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Grafana modes now label the camera with its display name instead of its UUID**
+  ([#34](https://github.com/calebcall/camera-ui-notify/issues/34)). `Data["cameraId"]` is a UUID for
+  the publishers seen so far, so alerts read `camera=07614b1d-d5de-48b7-bbb2-592a64a97ead` and IRM
+  grouped under `camera.ui:07614b1d-…`, which is unusable at a glance.
+
+  The name is resolved cheapest-first: `Data["cameraName"]` if a publisher supplies one, else the
+  camera segment of the deep link (camera.ui routes cameras by display name, so this is `Patio`
+  while the id is a UUID), else the raw id so a notification with neither still gets a label. No
+  RPC and no camera lookup — `DeviceManager.GetCamera` would also resolve a name but builds a full
+  camera-device proxy and calls `init()` on it, which is heavy and side-effecting for a Hub plugin
+  that owns no cameras.
+
+  This reaches the annotations `camera:<name>` tag, the alertmanager `camera` label, and the IRM
+  `camera` label, `groupLabels` and `groupKey`. Alertmanager and IRM modes additionally keep the
+  raw id as `camera_id` (omitted when it would merely repeat `camera`), since names change and ids
+  do not — routing rules that must survive a rename can match on that.
+
+  **IRM alert groups will regroup**: existing groups keyed `camera.ui:<uuid>` are replaced by
+  `camera.ui:<name>`.
+
 - **`grafana_ttl` no longer sets a `Step`.** With `min=30 step=30`, an HTML5 number input rejects
   legitimate values such as 100 or 450. Nothing about a TTL needs 30-second granularity.
+
+### Added
+
+- **`grafana_irm_ttl`** (default `300`, minimum `30`). IRM alerts now carry a future `endsAt`
+  (`startsAt + grafana_irm_ttl`) instead of the never-resolves sentinel `0001-01-01T00:00:00Z`.
+  That is how Alertmanager expresses "resolves on its own at this time", and IRM's
+  `grafana_alerting` templates read the same envelope — but whether IRM actually acts on it is
+  **unverified**. If it does not, groups stay open until closed by hand, exactly as before, so this
+  is an improvement-or-no-change rather than a risk. Still one stateless POST per event: there is
+  no follow-up `state: "ok"` request and no background timer.
 
 ## [0.6.1] - 2026-08-02
 

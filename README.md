@@ -121,9 +121,10 @@ different services, so each has its own connection fields.
 | `grafana_alertname`     | no       | alertmanager  | `alertname` label. Defaults to `CameraUINotification`.    |
 | `grafana_ttl`           | no       | alertmanager  | Seconds before Alertmanager auto-resolves the alert. Default `300`, minimum `30`. |
 | `grafana_irm_url`       | yes      | irm           | Inbound webhook URL of an IRM / OnCall integration. The token is in the URL, so it is masked and kept out of every error message. |
+| `grafana_irm_ttl`       | no       | irm           | Seconds before the alert is eligible to auto-resolve. Default `300`, minimum `30`. Whether IRM acts on it depends on the integration's templates. |
 
 **Annotations** — `POST {server}/api/annotations` with a point-in-time, organization-wide
-annotation tagged `camera.ui`, `camera:<id>`, `severity:<level>`, plus your extra tags. Surface it
+annotation tagged `camera.ui`, `camera:<name>`, `severity:<level>`, plus your extra tags. Surface it
 on a dashboard with an annotation query filtered on the `camera.ui` tag; that survives dashboard
 renames, which pinning to a dashboard UID would not. The tooltip text carries the title, the body,
 and — when `base_url` is set — a link back to camera.ui.
@@ -141,7 +142,7 @@ Cloud's hosted Alertmanager (username = instance ID, password = API token).
 
 `endsAt` is `startsAt + grafana_ttl`, which lets Alertmanager auto-resolve the alert without a
 second request. Labels are `alertname`, `source=camera.ui`, `severity` (camera.ui's own four
-levels, verbatim), `camera`, and a unique `event_id` — the last of these matters, because
+levels, verbatim), `camera`, `camera_id`, and a unique `event_id` — the last of these matters, because
 Alertmanager deduplicates on the label set and without it two detections on one camera inside the
 TTL window would collapse into a single alert. The absolute deep link becomes `generatorURL`,
 which Alertmanager shows as **Source**.
@@ -154,11 +155,19 @@ labels/annotations/`generatorURL`/`imageURL`, `groupKey`, `commonLabels`, `exter
 `link_to_upstream_details`) for a **Webhook** integration. `title`, `message`, and
 `state=alerting` are read by both. One body, correct under either type, nothing to configure.
 
-Alert groups are keyed **per camera** — `camera.ui:<cameraId>`, falling back to `camera.ui` for a
+Alert groups are keyed **per camera** — `camera.ui:<camera>`, falling back to `camera.ui` for a
 notification that names no camera — so one busy camera can't bury a quiet one. Within a group each
-event keeps its own `fingerprint`, so detections stay individually visible. Unlike Alertmanager mode,
-IRM groups do **not** auto-resolve: there is no TTL and no follow-up `state: "ok"` request, so they
-stay open until you resolve them.
+event keeps its own `fingerprint`, so detections stay individually visible. Each alert carries a
+future `endsAt` (`startsAt + grafana_irm_ttl`), the same way Alertmanager mode expresses
+"resolves on its own at this time"; whether IRM acts on it depends on the integration's templates,
+and if it does not, groups stay open until you resolve them by hand. There is still no follow-up
+`state: "ok"` request — every mode is one stateless POST per event.
+
+> **Camera names:** `camera` carries the camera's display name, taken from `Data["cameraName"]`
+> when a publisher supplies one and otherwise from the deep link, which camera.ui routes by name.
+> `Data["cameraId"]` is a UUID for the publishers seen so far, so it is kept separately as
+> `camera_id` (alertmanager and IRM modes) for routing rules that must survive a rename. With
+> neither a name nor a deep link, `camera` falls back to the id.
 
 > **Images:** ntfy, Pushover, Telegram, and Discord all render the detection snapshot. Gotify is
 > text + link only (it needs a hosted image URL, which this fully-local plugin doesn't provide).

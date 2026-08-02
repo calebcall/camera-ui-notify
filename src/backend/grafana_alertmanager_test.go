@@ -373,3 +373,34 @@ func TestGrafanaAlertmanagerSendErrorDoesNotLeakCredentials(t *testing.T) {
 		t.Errorf("error = %q, want the basic-auth password kept out of it", err.Error())
 	}
 }
+
+// #34: the camera label should be readable. Data["cameraId"] is a UUID;
+// camera.ui routes cameras by display name, so the deep link carries one.
+func TestGrafanaAlertmanagerCameraLabelPrefersReadableName(t *testing.T) {
+	got, _, _ := sendOneAlert(t, nil, sdk.Notification{
+		Title:    "Patio — Audio",
+		DeepLink: "https://cam.example/cameras/Patio?startTs=123",
+		Data:     map[string]string{"cameraId": "07614b1d-d5de-48b7-bbb2-592a64a97ead"},
+	})
+
+	if got.Labels["camera"] != "Patio" {
+		t.Errorf("labels.camera = %q, want the readable name from the deep link", got.Labels["camera"])
+	}
+	if got.Labels["camera_id"] != "07614b1d-d5de-48b7-bbb2-592a64a97ead" {
+		t.Errorf("labels.camera_id = %q, want the raw UUID retained for rename-proof routing", got.Labels["camera_id"])
+	}
+}
+
+func TestGrafanaAlertmanagerCameraIDOmittedWhenItRepeatsTheLabel(t *testing.T) {
+	got, _, _ := sendOneAlert(t, nil, sdk.Notification{
+		Title: "x",
+		Data:  map[string]string{"cameraId": "driveway"},
+	})
+
+	if got.Labels["camera"] != "driveway" {
+		t.Errorf("labels.camera = %q, want the id fallback", got.Labels["camera"])
+	}
+	if _, ok := got.Labels["camera_id"]; ok {
+		t.Errorf("labels.camera_id present, want it omitted when identical to camera")
+	}
+}

@@ -210,8 +210,14 @@ func (a *grafanaAlertmanager) send(ctx context.Context, client *http.Client, cfg
 		"severity":  grafanaSeverity(notif),
 		"event_id":  grafanaEventID(notif),
 	}
-	if cam := grafanaCameraID(notif); cam != "" {
+	if cam := grafanaCameraLabel(notif); cam != "" {
 		labels["camera"] = cam
+	}
+	// The raw id is kept alongside the readable name: names change, ids do
+	// not, so routing rules that must survive a rename can match on this.
+	// Omitted when it would merely repeat the camera label.
+	if id := grafanaCameraID(notif); id != "" && id != labels["camera"] {
+		labels["camera_id"] = id
 	}
 
 	annotations := map[string]string{"summary": notif.Title}

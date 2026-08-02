@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -64,7 +65,9 @@ func sendOneIRM(t *testing.T, notif sdk.Notification) decodedGrafanaIRM {
 	g := newGrafana()
 	g.client = srv.Client()
 
-	if err := g.Send(nil, map[string]string{"mode": grafanaModeIRM, "url": srv.URL}, notif); err != nil {
+	cfg := map[string]string{"mode": grafanaModeIRM, "url": srv.URL,
+		"ttl": strconv.Itoa(grafanaDefaultTTL)}
+	if err := g.Send(nil, cfg, notif); err != nil {
 		t.Fatalf("Send: unexpected error: %v", err)
 	}
 	return got
@@ -93,23 +96,100 @@ func TestGrafanaIRMParseDoesNotRequireServerOrToken(t *testing.T) {
 }
 
 func TestGrafanaIRMSchemaGating(t *testing.T) {
-	fields := newGrafanaIRM().schema()
-	if len(fields) != 1 {
-		t.Fatalf("schema has %d fields, want 1", len(fields))
+	byKey := map[string]sdk.JsonSchema{}
+	wantCond := grafanaModeCondition(grafanaModeIRM)
+	for _, f := range newGrafanaIRM().schema() {
+		byKey[f.Key] = f
+		if !reflect.DeepEqual(f.Condition, wantCond) {
+			t.Errorf("field %q: Condition = %+v, want %+v", f.Key, f.Condition, wantCond)
+		}
+		if !strings.HasPrefix(f.Key, "grafana_") {
+			t.Errorf("field key %q: want a grafana_ prefix", f.Key)
+		}
 	}
-	f := fields[0]
-	if f.Key != "grafana_irm_url" {
-		t.Errorf("key = %q, want %q", f.Key, "grafana_irm_url")
+
+	u, ok := byKey["grafana_irm_url"]
+	if !ok {
+		t.Fatalf("schema missing %q field", "grafana_irm_url")
 	}
-	if !f.Required {
-		t.Errorf("Required = false, want true")
+	if !u.Required {
+		t.Errorf("grafana_irm_url Required = false, want true")
 	}
-	if f.Format != sdk.StringFormatPassword {
-		t.Errorf("Format = %q, want %q (the URL embeds the credential)", f.Format, sdk.StringFormatPassword)
+	if u.Format != sdk.StringFormatPassword {
+		t.Errorf("grafana_irm_url Format = %q, want %q (the URL embeds the credential)", u.Format, sdk.StringFormatPassword)
 	}
-	want := grafanaModeCondition(grafanaModeIRM)
-	if !reflect.DeepEqual(f.Condition, want) {
-		t.Errorf("Condition = %+v, want %+v", f.Condition, want)
+
+	ttl, ok := byKey["grafana_irm_ttl"]
+	if !ok {
+		t.Fatalf("schema missing %q field", "grafana_irm_ttl")
+	}
+	if ttl.Type != sdk.JsonSchemaTypeNumber {
+		t.Errorf("grafana_irm_ttl Type = %q, want %q", ttl.Type, sdk.JsonSchemaTypeNumber)
+	}
+	if ttl.DefaultValue != grafanaDefaultTTL {
+		t.Errorf("grafana_irm_ttl DefaultValue = %v, want %d", ttl.DefaultValue, grafanaDefaultTTL)
+	}
+	if ttl.Required {
+		t.Errorf("grafana_irm_ttl Required = true, want false")
+	}
+
+	// grafana_ttl belongs to alertmanager mode; a duplicate key here would
+	// collide in the flattened StorageSchema.
+	if _, ok := byKey["grafana_ttl"]; ok {
+		t.Errorf("IRM schema declares grafana_ttl, want the distinct grafana_irm_ttl key")
+	}
+}
+
+// #34: Data["cameraId"] is a UUID, which is useless in a label or a group
+// key. camera.ui routes cameras by display name, so the deep link carries a
+// readable one.
+func TestGrafanaIRMCameraLabelPrefersReadableName(t *testing.T) {
+	got := sendOneIRM(t, sdk.Notification{
+		Title:    "Patio — Audio",
+		DeepLink: "https://cam.example/cameras/Patio?startTs=123",
+		Data:     map[string]string{"cameraId": "07614b1d-d5de-48b7-bbb2-592a64a97ead"},
+	})
+
+	if got.Alerts[0].Labels["camera"] != "Patio" {
+		t.Errorf("labels.camera = %q, want the readable name from the deep link", got.Alerts[0].Labels["camera"])
+	}
+	if got.Alerts[0].Labels["camera_id"] != "07614b1d-d5de-48b7-bbb2-592a64a97ead" {
+		t.Errorf("labels.camera_id = %q, want the raw UUID retained", got.Alerts[0].Labels["camera_id"])
+	}
+	if got.GroupKey != "camera.ui:Patio" {
+		t.Errorf("groupKey = %q, want it keyed on the readable name", got.GroupKey)
+	}
+	if got.GroupLabels["camera"] != "Patio" {
+		t.Errorf("groupLabels.camera = %q, want the readable name", got.GroupLabels["camera"])
+	}
+}
+
+func TestGrafanaIRMCameraLabelPrefersExplicitCameraName(t *testing.T) {
+	got := sendOneIRM(t, sdk.Notification{
+		Title:    "x",
+		DeepLink: "https://cam.example/cameras/slug-from-route",
+		Data:     map[string]string{"cameraId": "uuid-1", "cameraName": "Front Door"},
+	})
+
+	if got.Alerts[0].Labels["camera"] != "Front Door" {
+		t.Errorf("labels.camera = %q, want Data[cameraName] to win over the deep link", got.Alerts[0].Labels["camera"])
+	}
+}
+
+func TestGrafanaIRMCameraLabelFallsBackToID(t *testing.T) {
+	got := sendOneIRM(t, sdk.Notification{
+		Title: "x",
+		Data:  map[string]string{"cameraId": "uuid-1"},
+	})
+
+	if got.Alerts[0].Labels["camera"] != "uuid-1" {
+		t.Errorf("labels.camera = %q, want the id when no name is available", got.Alerts[0].Labels["camera"])
+	}
+	if _, ok := got.Alerts[0].Labels["camera_id"]; ok {
+		t.Errorf("labels.camera_id present, want it omitted when it would repeat the camera label")
+	}
+	if got.GroupKey != "camera.ui:uuid-1" {
+		t.Errorf("groupKey = %q, want the id fallback", got.GroupKey)
 	}
 }
 
@@ -287,7 +367,9 @@ func TestGrafanaIRMSendEmitsAlertingEnvelope(t *testing.T) {
 		"source":    "camera.ui",
 		"severity":  "warn",
 		"camera":    "Patio",
+		"camera_id": "Patio",
 	}
+	delete(wantLabels, "camera_id") // id equals the label here, so it is omitted
 	if !reflect.DeepEqual(a.Labels, wantLabels) {
 		t.Errorf("alerts[0].labels = %v, want %v", a.Labels, wantLabels)
 	}
@@ -309,8 +391,16 @@ func TestGrafanaIRMSendEmitsAlertingEnvelope(t *testing.T) {
 	if _, err := time.Parse(time.RFC3339, a.StartsAt); err != nil {
 		t.Errorf("alerts[0].startsAt = %q, not RFC3339: %v", a.StartsAt, err)
 	}
-	if a.EndsAt != grafanaIRMUnresolvedEndsAt {
-		t.Errorf("alerts[0].endsAt = %q, want the unresolved sentinel %q", a.EndsAt, grafanaIRMUnresolvedEndsAt)
+	end, err := time.Parse(time.RFC3339, a.EndsAt)
+	if err != nil {
+		t.Fatalf("alerts[0].endsAt = %q, not RFC3339: %v", a.EndsAt, err)
+	}
+	start, err := time.Parse(time.RFC3339, a.StartsAt)
+	if err != nil {
+		t.Fatalf("alerts[0].startsAt = %q, not RFC3339: %v", a.StartsAt, err)
+	}
+	if d := end.Sub(start); d != time.Duration(grafanaDefaultTTL)*time.Second {
+		t.Errorf("endsAt - startsAt = %v, want the default TTL of %ds", d, grafanaDefaultTTL)
 	}
 
 	if !reflect.DeepEqual(got.CommonLabels, wantLabels) {

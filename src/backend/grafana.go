@@ -277,6 +277,33 @@ func grafanaCameraID(notif sdk.Notification) string {
 	return strings.TrimSpace(notif.Data["cameraId"])
 }
 
+// grafanaCameraLabel returns the value modes should show as the camera:
+// a human-readable name where one can be had, falling back to the id.
+//
+// Data["cameraId"] is a UUID for the publishers seen in the wild, and
+// "camera=07614b1d-d5de-48b7-bbb2-592a64a97ead" is useless in an alert or a
+// group key (#34). Three sources, cheapest first:
+//
+//  1. Data["cameraName"], if a publisher supplies one.
+//  2. The camera segment of the deep link. camera.ui routes cameras by
+//     display name, so this is "Patio" while cameraId is the UUID. Free —
+//     no RPC and no camera lookup.
+//  3. The raw id, so a notification with neither still gets a label.
+//
+// DeviceManager.GetCamera would also resolve a name, but it builds a full
+// camera-device proxy and calls init() on it, which is heavy and
+// side-effecting for a Hub plugin that owns no cameras — not worth it when
+// the deep link already carries the answer.
+func grafanaCameraLabel(notif sdk.Notification) string {
+	if name := strings.TrimSpace(notif.Data["cameraName"]); name != "" {
+		return name
+	}
+	if seg := DeepLinkCameraSegment(notif); seg != "" {
+		return seg
+	}
+	return grafanaCameraID(notif)
+}
+
 // grafanaSeverity returns camera.ui's severity verbatim, defaulting to info.
 // It is deliberately not squashed into Prometheus's warning/critical
 // convention: passing all four levels through is lossless, and routing on
