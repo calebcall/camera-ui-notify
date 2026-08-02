@@ -5,6 +5,43 @@ All notable changes to **Notify** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-08-02
+
+### Fixed
+
+- **Grafana IRM mode now renders correctly on a `grafana_alerting` integration** ([#31](https://github.com/calebcall/camera-ui-notify/issues/31)).
+  0.6.0 sent only Grafana OnCall's formatted-webhook field set. IRM renders each alert group
+  through Jinja2 templates chosen by the integration's *type*, and a `grafana_alerting`
+  integration's templates read `payload.status` and `payload.alerts[]` — neither of which we sent.
+  The result was an alert group that arrived intact but displayed as
+  `Status: Unknown ⚠️ (Template Warning: 'dict object' has no attribute 'alerts')`, with
+  `numFiring`/`numResolved` showing IRM's zero defaults for the absent `alerts` array.
+
+  The payload is now a union of both shapes: Grafana Alerting's documented webhook envelope
+  (`receiver`, `status`, `alerts[]` carrying labels, annotations, `startsAt`/`endsAt`,
+  `generatorURL`, `fingerprint` and `imageURL`, plus `groupLabels`, `commonLabels`,
+  `commonAnnotations`, `externalURL`, `version`, `groupKey`, `truncatedAlerts`) alongside the
+  formatted-webhook fields 0.6.0 already sent. `title`, `message` and `state` are read by both and
+  are unchanged, so a **Webhook**-type integration configured against 0.6.0 keeps working exactly
+  as before — this is additive, not a replacement.
+
+  This was a design-time error rather than an implementation one: the spec specified the wrong
+  payload shape, and the unit tests could not catch it because they assert our body against a test
+  server that accepts anything. The envelope now follows the schema Grafana documents for its
+  webhook contact point.
+
+### Added
+
+- **Per-camera grouping for IRM alert groups.** `groupKey` is `camera.ui:<cameraId>`, falling back
+  to `camera.ui` when a notification names no camera, so a busy camera cannot bury a quiet one.
+  Each event keeps a distinct `fingerprint` within its group. IRM groups still do not auto-resolve
+  — that remains deliberate, since a follow-up `state: "ok"` would need a background timer.
+- **The snapshot now reaches IRM through the documented `imageURL` alert field** as well as
+  `image_url`, so it renders under either integration type. Still only when the publisher supplied
+  a hosted `ImageURL`.
+- **`externalURL`** is derived from the absolute deep link's scheme and host, so it needs no new
+  configuration; it is omitted when `base_url` is unset and the deep link is therefore relative.
+
 ## [0.6.0] - 2026-08-01
 
 ### Added

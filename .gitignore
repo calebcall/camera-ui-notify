@@ -8,3 +8,4 @@ bundle
 .superpowers
 superpowers
 .tmp
+.gstack/

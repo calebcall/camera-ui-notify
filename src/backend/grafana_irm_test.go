@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/cameraui/sdk/go"
 )
@@ -19,6 +20,54 @@ type decodedGrafanaIRM struct {
 	ImageURL string `json:"image_url"`
 	Link     string `json:"link_to_upstream_details"`
 	State    string `json:"state"`
+
+	// Grafana Alerting webhook envelope — what a grafana_alerting
+	// integration's templates read.
+	Receiver          string                   `json:"receiver"`
+	Status            string                   `json:"status"`
+	Alerts            []decodedGrafanaIRMAlert `json:"alerts"`
+	GroupLabels       map[string]string        `json:"groupLabels"`
+	CommonLabels      map[string]string        `json:"commonLabels"`
+	CommonAnnotations map[string]string        `json:"commonAnnotations"`
+	ExternalURL       string                   `json:"externalURL"`
+	Version           string                   `json:"version"`
+	GroupKey          string                   `json:"groupKey"`
+	TruncatedAlerts   int                      `json:"truncatedAlerts"`
+}
+
+type decodedGrafanaIRMAlert struct {
+	Status       string            `json:"status"`
+	Labels       map[string]string `json:"labels"`
+	Annotations  map[string]string `json:"annotations"`
+	StartsAt     string            `json:"startsAt"`
+	EndsAt       string            `json:"endsAt"`
+	GeneratorURL string            `json:"generatorURL"`
+	Fingerprint  string            `json:"fingerprint"`
+	ImageURL     string            `json:"imageURL"`
+}
+
+// sendOneIRM runs a single IRM-mode Send against an httptest server and
+// returns the decoded body.
+func sendOneIRM(t *testing.T, notif sdk.Notification) decodedGrafanaIRM {
+	t.Helper()
+
+	var got decodedGrafanaIRM
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	g := newGrafana()
+	g.client = srv.Client()
+
+	if err := g.Send(nil, map[string]string{"mode": grafanaModeIRM, "url": srv.URL}, notif); err != nil {
+		t.Fatalf("Send: unexpected error: %v", err)
+	}
+	return got
 }
 
 func TestGrafanaIRMParseRequiresURL(t *testing.T) {
@@ -195,5 +244,163 @@ func TestGrafanaIRMSendTransportErrorDoesNotLeakIntegrationURL(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "sup3rs3cr3t") {
 		t.Errorf("error = %q, want the integration URL redacted out", err.Error())
+	}
+}
+
+// The tests below cover the Grafana Alerting webhook envelope added in
+// response to #31: a grafana_alerting integration renders alert groups with
+// templates that read payload.status and payload.alerts[], and 0.6.0 sent
+// neither, producing "'dict object' has no attribute 'alerts'".
+
+func TestGrafanaIRMSendEmitsAlertingEnvelope(t *testing.T) {
+	got := sendOneIRM(t, sdk.Notification{
+		Title:    "Patio — Person",
+		Body:     "Person 100% · person",
+		Severity: sdk.SeverityWarn,
+		ImageURL: "https://cam.example/snap.jpg",
+		DeepLink: "https://cam.example/cameras/Patio?startTs=1785642365558",
+		Data:     map[string]string{"cameraId": "Patio", "eventId": "evt-42"},
+	})
+
+	if got.Status != "firing" {
+		t.Errorf("status = %q, want %q", got.Status, "firing")
+	}
+	if got.Receiver != "camera.ui" {
+		t.Errorf("receiver = %q, want %q", got.Receiver, "camera.ui")
+	}
+	if got.Version != "1" {
+		t.Errorf("version = %q, want %q", got.Version, "1")
+	}
+	if got.TruncatedAlerts != 0 {
+		t.Errorf("truncatedAlerts = %d, want 0", got.TruncatedAlerts)
+	}
+	if len(got.Alerts) != 1 {
+		t.Fatalf("alerts has %d entries, want exactly 1", len(got.Alerts))
+	}
+
+	a := got.Alerts[0]
+	if a.Status != "firing" {
+		t.Errorf("alerts[0].status = %q, want %q", a.Status, "firing")
+	}
+	wantLabels := map[string]string{
+		"alertname": grafanaDefaultAlertname,
+		"source":    "camera.ui",
+		"severity":  "warn",
+		"camera":    "Patio",
+	}
+	if !reflect.DeepEqual(a.Labels, wantLabels) {
+		t.Errorf("alerts[0].labels = %v, want %v", a.Labels, wantLabels)
+	}
+	if a.Annotations["summary"] != "Patio — Person" {
+		t.Errorf("alerts[0].annotations.summary = %q, want the title", a.Annotations["summary"])
+	}
+	if a.Annotations["description"] != "Person 100% · person" {
+		t.Errorf("alerts[0].annotations.description = %q, want the body", a.Annotations["description"])
+	}
+	if a.Fingerprint != "evt-42" {
+		t.Errorf("alerts[0].fingerprint = %q, want the event id", a.Fingerprint)
+	}
+	if a.GeneratorURL != "https://cam.example/cameras/Patio?startTs=1785642365558" {
+		t.Errorf("alerts[0].generatorURL = %q, want the absolute deep link", a.GeneratorURL)
+	}
+	if a.ImageURL != "https://cam.example/snap.jpg" {
+		t.Errorf("alerts[0].imageURL = %q, want the snapshot URL", a.ImageURL)
+	}
+	if _, err := time.Parse(time.RFC3339, a.StartsAt); err != nil {
+		t.Errorf("alerts[0].startsAt = %q, not RFC3339: %v", a.StartsAt, err)
+	}
+	if a.EndsAt != grafanaIRMUnresolvedEndsAt {
+		t.Errorf("alerts[0].endsAt = %q, want the unresolved sentinel %q", a.EndsAt, grafanaIRMUnresolvedEndsAt)
+	}
+
+	if !reflect.DeepEqual(got.CommonLabels, wantLabels) {
+		t.Errorf("commonLabels = %v, want the alert's labels %v", got.CommonLabels, wantLabels)
+	}
+	if got.CommonAnnotations["summary"] != "Patio — Person" {
+		t.Errorf("commonAnnotations.summary = %q, want the title", got.CommonAnnotations["summary"])
+	}
+}
+
+func TestGrafanaIRMGroupKeyIsPerCamera(t *testing.T) {
+	got := sendOneIRM(t, sdk.Notification{
+		Title: "Patio — Person",
+		Data:  map[string]string{"cameraId": "Patio"},
+	})
+	if got.GroupKey != "camera.ui:Patio" {
+		t.Errorf("groupKey = %q, want %q", got.GroupKey, "camera.ui:Patio")
+	}
+	wantGroupLabels := map[string]string{"alertname": grafanaDefaultAlertname, "camera": "Patio"}
+	if !reflect.DeepEqual(got.GroupLabels, wantGroupLabels) {
+		t.Errorf("groupLabels = %v, want %v", got.GroupLabels, wantGroupLabels)
+	}
+}
+
+func TestGrafanaIRMGroupKeyFallsBackWithoutCamera(t *testing.T) {
+	got := sendOneIRM(t, sdk.Notification{Title: "Plugin updated"})
+
+	if got.GroupKey != "camera.ui" {
+		t.Errorf("groupKey = %q, want %q for a non-camera notification", got.GroupKey, "camera.ui")
+	}
+	wantGroupLabels := map[string]string{"alertname": grafanaDefaultAlertname}
+	if !reflect.DeepEqual(got.GroupLabels, wantGroupLabels) {
+		t.Errorf("groupLabels = %v, want %v", got.GroupLabels, wantGroupLabels)
+	}
+	if _, ok := got.Alerts[0].Labels["camera"]; ok {
+		t.Errorf("alerts[0].labels has a camera key, want it omitted with no cameraId")
+	}
+}
+
+func TestGrafanaIRMTwoCamerasGetDistinctGroupKeys(t *testing.T) {
+	patio := sendOneIRM(t, sdk.Notification{Title: "a", Data: map[string]string{"cameraId": "Patio"}})
+	drive := sendOneIRM(t, sdk.Notification{Title: "b", Data: map[string]string{"cameraId": "Driveway"}})
+
+	if patio.GroupKey == drive.GroupKey {
+		t.Errorf("both cameras produced groupKey %q, want one group per camera", patio.GroupKey)
+	}
+}
+
+func TestGrafanaIRMExternalURLDerivedFromDeepLink(t *testing.T) {
+	got := sendOneIRM(t, sdk.Notification{
+		Title:    "x",
+		DeepLink: "https://cameraui.example.com/cameras/Patio?startTs=123",
+	})
+	if got.ExternalURL != "https://cameraui.example.com" {
+		t.Errorf("externalURL = %q, want the deep link's scheme+host", got.ExternalURL)
+	}
+}
+
+func TestGrafanaIRMExternalURLEmptyForRelativeDeepLink(t *testing.T) {
+	got := sendOneIRM(t, sdk.Notification{Title: "x", DeepLink: "/cameras/Patio"})
+
+	if got.ExternalURL != "" {
+		t.Errorf("externalURL = %q, want empty when the deep link is relative", got.ExternalURL)
+	}
+	if got.Alerts[0].GeneratorURL != "" {
+		t.Errorf("alerts[0].generatorURL = %q, want empty for a relative deep link", got.Alerts[0].GeneratorURL)
+	}
+}
+
+func TestGrafanaIRMKeepsFormattedWebhookFields(t *testing.T) {
+	// The envelope is additive: a formatted-webhook ("webhook" type)
+	// integration must keep rendering, so 0.6.0's field set stays.
+	got := sendOneIRM(t, sdk.Notification{
+		Title:    "Patio — Person",
+		Body:     "Person 100%",
+		ImageURL: "https://cam.example/snap.jpg",
+		DeepLink: "https://cam.example/cameras/Patio",
+		Data:     map[string]string{"eventId": "evt-42"},
+	})
+
+	if got.AlertUID != "evt-42" {
+		t.Errorf("alert_uid = %q, want it retained", got.AlertUID)
+	}
+	if got.Title != "Patio — Person" || got.Message != "Person 100%" || got.State != "alerting" {
+		t.Errorf("title/message/state = %q/%q/%q, want them retained", got.Title, got.Message, got.State)
+	}
+	if got.ImageURL != "https://cam.example/snap.jpg" {
+		t.Errorf("image_url = %q, want it retained", got.ImageURL)
+	}
+	if got.Link != "https://cam.example/cameras/Patio" {
+		t.Errorf("link_to_upstream_details = %q, want it retained", got.Link)
 	}
 }

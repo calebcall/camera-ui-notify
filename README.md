@@ -132,9 +132,19 @@ Alertmanager deduplicates on the label set and without it two detections on one 
 TTL window would collapse into a single alert. The absolute deep link becomes `generatorURL`,
 which Grafana shows as **Source**.
 
-**IRM** — `POST {integration URL}` using Grafana IRM / OnCall's formatted-webhook fields
-(`alert_uid`, `title`, `message`, `image_url`, `link_to_upstream_details`, `state=alerting`), one
-alert group per event.
+**IRM** — `POST {integration URL}`. IRM renders each alert group through templates chosen by the
+integration's *type*, and the two types people actually create read different bodies, so the
+payload carries both: Grafana Alerting's webhook envelope (`status`, `alerts[]` with
+labels/annotations/`generatorURL`/`imageURL`, `groupKey`, `commonLabels`, `externalURL`) for a
+**Grafana Alerting** integration, and OnCall's formatted-webhook fields (`alert_uid`, `image_url`,
+`link_to_upstream_details`) for a **Webhook** integration. `title`, `message`, and
+`state=alerting` are read by both. One body, correct under either type, nothing to configure.
+
+Alert groups are keyed **per camera** — `camera.ui:<cameraId>`, falling back to `camera.ui` for a
+notification that names no camera — so one busy camera can't bury a quiet one. Within a group each
+event keeps its own `fingerprint`, so detections stay individually visible. Unlike Alerts mode,
+IRM groups do **not** auto-resolve: there is no TTL and no follow-up `state: "ok"` request, so they
+stay open until you resolve them.
 
 > **Images:** ntfy, Pushover, Telegram, and Discord all render the detection snapshot. Gotify is
 > text + link only (it needs a hosted image URL, which this fully-local plugin doesn't provide).
