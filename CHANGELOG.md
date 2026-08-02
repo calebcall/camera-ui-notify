@@ -5,6 +5,45 @@ All notable changes to **Notify** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-02
+
+### Changed
+
+- **The Grafana `alerts` mode is renamed `alertmanager` and now posts to an Alertmanager directly**
+  ([#33](https://github.com/calebcall/camera-ui-notify/issues/33)). **This mode requires
+  reconfiguration.** It never worked in 0.6.0 or 0.6.1 — every send failed with
+  `400 bad request data` — so no working setup is disturbed.
+
+  The mode targeted `{grafanaServer}/api/alertmanager/grafana/api/v2/alerts` on the assumption that
+  Grafana's built-in Alertmanager accepts injected alerts. It does not. Grafana's route table
+  declares built-in-Alertmanager operations with a literal `grafana` path segment and external ones
+  with `{DatasourceUID}`; there is a `GET /alertmanager/grafana/api/v2/alerts` but **no `POST`
+  equivalent** — reads are supported, writes are not. The forking handler
+  (`pkg/services/ngalert/api/forking_alertmanager.go`) resolves an Alertmanager *datasource* by UID
+  and always returns the external proxy, never the built-in service, so a request naming `grafana`
+  as the UID matches no datasource and fails. Grafana-managed alerts can only originate from
+  Grafana's own rule evaluation; there is no supported path to inject one.
+
+  The mode now addresses an Alertmanager's own v2 API — `POST {alertmanager}/api/v2/alerts` — with
+  optional basic auth. That works with a standalone Prometheus Alertmanager, Mimir/Cortex, and
+  Grafana Cloud's hosted Alertmanager (username = instance ID, password = API token). The name
+  follows the behaviour: this mode talks to Alertmanager, not to Grafana.
+
+  Config changes for this mode: `grafana_server` and `grafana_token` are no longer used (they are
+  now annotations-only) and are replaced by `grafana_am_url` plus the optional `grafana_am_user` /
+  `grafana_am_password` pair. Setting only one of the two credential fields is rejected at parse
+  time rather than surfacing as a confusing 401. `grafana_alertname` and `grafana_ttl` are
+  unchanged, and the alert payload itself is unchanged — it already matched Alertmanager's
+  documented `postableAlert` schema; only the destination was wrong.
+
+- **`grafana_server` / `grafana_token` are now gated to annotations mode only**, since it is the
+  one mode that addresses a Grafana instance. They no longer use the `in` condition operator.
+
+### Fixed
+
+- **`grafana_ttl` no longer sets a `Step`.** With `min=30 step=30`, an HTML5 number input rejects
+  legitimate values such as 100 or 450. Nothing about a TTL needs 30-second granularity.
+
 ## [0.6.1] - 2026-08-02
 
 ### Fixed

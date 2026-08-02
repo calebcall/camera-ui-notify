@@ -21,9 +21,9 @@ import (
 // are persisted in the plugin's config as the value of "grafana_mode" and in
 // the parsed cfg map as "mode" — never change one once shipped.
 const (
-	grafanaModeAnnotations = "annotations"
-	grafanaModeAlerts      = "alerts"
-	grafanaModeIRM         = "irm"
+	grafanaModeAnnotations  = "annotations"
+	grafanaModeAlertmanager = "alertmanager"
+	grafanaModeIRM          = "irm"
 )
 
 // grafanaMode is a private second strategy layer, mirroring the package's
@@ -34,12 +34,12 @@ const (
 type grafanaMode interface {
 	// id is the value of the "grafana_mode" config field selecting this mode.
 	id() string
-	// schema returns only this mode's exclusive fields. Fields shared across
-	// modes (server, token) are declared once by grafana.Schema instead, so
-	// the flattened StorageSchema never carries a duplicate key.
+	// schema returns only this mode's exclusive fields. The Grafana-instance
+	// fields (server, token) are declared by grafana.Schema instead, so the
+	// flattened StorageSchema never carries a duplicate key.
 	schema() []sdk.JsonSchema
 	// parse validates the raw config input for this mode and returns the
-	// normalized cfg. It may read shared keys via grafanaServerAndToken.
+	// normalized cfg. It may read the instance keys via grafanaServerAndToken.
 	parse(input map[string]any) (map[string]string, error)
 	// send delivers one notification. client and ctx are supplied by
 	// grafana.Send so the mode holds no state of its own.
@@ -64,7 +64,7 @@ func newGrafana() *grafana {
 		client: &http.Client{Timeout: 10 * time.Second},
 		modes: []grafanaMode{
 			newGrafanaAnnotations(),
-			newGrafanaAlerts(),
+			newGrafanaAlertmanager(),
 			newGrafanaIRM(),
 		},
 	}
@@ -102,25 +102,25 @@ func grafanaModeCondition(mode string) []sdk.SchemaCondition {
 	}
 }
 
-// Schema returns the mode selector, the fields shared by the annotations and
-// alerts modes (both address the same Grafana instance with the same
-// service-account token), and then each mode's own fields. The shared fields
-// are declared here rather than by each mode so the flattened StorageSchema
-// never carries a duplicate key.
+// Schema returns the mode selector, the Grafana-instance fields, and then
+// each mode's own fields.
+//
+// grafana_server / grafana_token address a Grafana instance, which only the
+// annotations mode does: alertmanager mode posts to an Alertmanager's own API
+// (Grafana cannot accept injected alerts — see grafana_alertmanager.go) and
+// IRM mode authenticates through its integration URL. They are declared here
+// rather than inside the annotations mode purely for historical continuity of
+// their keys; a mode's own fields still live with the mode.
 func (g *grafana) Schema() []sdk.JsonSchema {
-	instanceModes := []string{grafanaModeAnnotations, grafanaModeAlerts}
-	instanceCond := []sdk.SchemaCondition{
-		{Key: "service", Value: "grafana"},
-		{Key: "grafana_mode", Operator: sdk.SchemaConditionIn, Value: instanceModes},
-	}
+	instanceCond := grafanaModeCondition(grafanaModeAnnotations)
 
 	fields := []sdk.JsonSchema{
 		{
 			Type:         sdk.JsonSchemaTypeString,
 			Key:          "grafana_mode",
 			Title:        "Mode",
-			Description:  "Which Grafana surface to deliver to: dashboard annotations, Grafana Alerting, or Grafana IRM / OnCall.",
-			Enum:         []string{grafanaModeAnnotations, grafanaModeAlerts, grafanaModeIRM},
+			Description:  "Which surface to deliver to: Grafana dashboard annotations, an Alertmanager, or Grafana IRM / OnCall.",
+			Enum:         []string{grafanaModeAnnotations, grafanaModeAlertmanager, grafanaModeIRM},
 			DefaultValue: grafanaModeAnnotations,
 			Required:     true,
 			Condition:    grafanaServiceCondition(),
@@ -191,14 +191,15 @@ func (g *grafana) Send(ctx context.Context, cfg map[string]string, notif sdk.Not
 	return m.send(ctx, client, cfg, notif)
 }
 
-// grafanaServerAndToken reads and validates the two config fields shared by
-// the annotations and alerts modes.
+// grafanaServerAndToken reads and validates the Grafana-instance config
+// fields. Only the annotations mode uses them: alertmanager mode addresses an
+// Alertmanager directly and IRM mode authenticates through its integration
+// URL.
 //
-// Its errors carry the backend-level "grafana: " prefix, not a mode-level
-// "grafana: <mode>: " one, even though every caller reaches it from within a
-// mode's parse. That is deliberate — server and token genuinely are shared
-// across two modes, not owned by either — but it means the "grafana: <mode>:
-// " prefix elsewhere is not a reliable signal of which layer actually failed.
+// Its errors carry the backend-level "grafana: " prefix rather than a
+// mode-level "grafana: <mode>: " one, even though its caller reaches it from
+// within a mode's parse, so that prefix is not a reliable signal of which
+// layer actually failed.
 func grafanaServerAndToken(input map[string]any) (string, string, error) {
 	server, _ := input["grafana_server"].(string)
 	server = strings.TrimSpace(server)

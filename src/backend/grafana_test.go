@@ -57,7 +57,7 @@ func TestGrafanaSchemaModeSelector(t *testing.T) {
 	if !ok {
 		t.Fatalf("schema missing %q field", "grafana_mode")
 	}
-	want := []string{grafanaModeAnnotations, grafanaModeAlerts, grafanaModeIRM}
+	want := []string{grafanaModeAnnotations, grafanaModeAlertmanager, grafanaModeIRM}
 	if !reflect.DeepEqual(mode.Enum, want) {
 		t.Errorf("grafana_mode Enum = %v, want %v", mode.Enum, want)
 	}
@@ -69,12 +69,17 @@ func TestGrafanaSchemaModeSelector(t *testing.T) {
 	}
 }
 
-func TestGrafanaSchemaSharedFieldsGatedOnModeIn(t *testing.T) {
+// grafana_server / grafana_token belong to the annotations mode alone.
+// Alertmanager mode addresses an Alertmanager directly (Grafana cannot accept
+// injected alerts — see #33) and IRM mode authenticates through its
+// integration URL, so neither needs a Grafana instance.
+func TestGrafanaSchemaInstanceFieldsGatedOnAnnotationsOnly(t *testing.T) {
 	byKey := map[string]sdk.JsonSchema{}
 	for _, f := range newGrafana().Schema() {
 		byKey[f.Key] = f
 	}
 
+	want := grafanaModeCondition(grafanaModeAnnotations)
 	for _, key := range []string{"grafana_server", "grafana_token"} {
 		f, ok := byKey[key]
 		if !ok {
@@ -83,19 +88,8 @@ func TestGrafanaSchemaSharedFieldsGatedOnModeIn(t *testing.T) {
 		if !f.Required {
 			t.Errorf("%s Required = false, want true", key)
 		}
-		if len(f.Condition) != 2 {
-			t.Fatalf("%s Condition = %+v, want 2 conditions (service + mode in)", key, f.Condition)
-		}
-		c := f.Condition[1]
-		if c.Key != "grafana_mode" {
-			t.Errorf("%s Condition[1].Key = %q, want %q", key, c.Key, "grafana_mode")
-		}
-		if c.Operator != sdk.SchemaConditionIn {
-			t.Errorf("%s Condition[1].Operator = %q, want %q", key, c.Operator, sdk.SchemaConditionIn)
-		}
-		want := []string{grafanaModeAnnotations, grafanaModeAlerts}
-		if !reflect.DeepEqual(c.Value, want) {
-			t.Errorf("%s Condition[1].Value = %v, want %v", key, c.Value, want)
+		if !reflect.DeepEqual(f.Condition, want) {
+			t.Errorf("%s Condition = %+v, want %+v", key, f.Condition, want)
 		}
 	}
 
@@ -105,10 +99,10 @@ func TestGrafanaSchemaSharedFieldsGatedOnModeIn(t *testing.T) {
 }
 
 func TestGrafanaModeCondition(t *testing.T) {
-	got := grafanaModeCondition(grafanaModeAlerts)
+	got := grafanaModeCondition(grafanaModeAlertmanager)
 	want := []sdk.SchemaCondition{
 		{Key: "service", Value: "grafana"},
-		{Key: "grafana_mode", Value: grafanaModeAlerts},
+		{Key: "grafana_mode", Value: grafanaModeAlertmanager},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("grafanaModeCondition = %+v, want %+v", got, want)
