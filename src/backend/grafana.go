@@ -193,6 +193,12 @@ func (g *grafana) Send(ctx context.Context, cfg map[string]string, notif sdk.Not
 
 // grafanaServerAndToken reads and validates the two config fields shared by
 // the annotations and alerts modes.
+//
+// Its errors carry the backend-level "grafana: " prefix, not a mode-level
+// "grafana: <mode>: " one, even though every caller reaches it from within a
+// mode's parse. That is deliberate — server and token genuinely are shared
+// across two modes, not owned by either — but it means the "grafana: <mode>:
+// " prefix elsewhere is not a reliable signal of which layer actually failed.
 func grafanaServerAndToken(input map[string]any) (string, string, error) {
 	server, _ := input["grafana_server"].(string)
 	server = strings.TrimSpace(server)

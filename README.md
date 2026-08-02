@@ -33,7 +33,7 @@ Adding a new backend later is **one new file** — `src/backend/<name>.go` imple
 
 ## Backends (v1)
 
-Severity is mapped consistently across backends via `backend.PriorityScale`, which spreads camera.ui's four severity levels (`info` → `warn` → `error` → `critical`) evenly across each backend's native priority range, `info` at the low end and `critical` at the high end.
+Severity is mapped consistently across backends via `backend.PriorityScale`, which spreads camera.ui's four severity levels (`info` → `warn` → `error` → `critical`) evenly across each backend's native priority range, `info` at the low end and `critical` at the high end. Grafana is the exception: no Grafana surface has a numeric priority, so severity travels verbatim as a label/tag.
 
 ### ntfy
 

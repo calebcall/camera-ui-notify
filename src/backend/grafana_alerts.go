@@ -43,7 +43,6 @@ func (a *grafanaAlerts) id() string { return grafanaModeAlerts }
 func (a *grafanaAlerts) schema() []sdk.JsonSchema {
 	cond := grafanaModeCondition(grafanaModeAlerts)
 	minTTL := float64(grafanaMinTTL)
-	step := float64(30)
 
 	return []sdk.JsonSchema{
 		{
@@ -61,7 +60,6 @@ func (a *grafanaAlerts) schema() []sdk.JsonSchema {
 			Description:  "How long the alert stays firing before Grafana resolves it automatically.",
 			DefaultValue: grafanaDefaultTTL,
 			Minimum:      &minTTL,
-			Step:         &step,
 			Condition:    cond,
 		},
 	}
@@ -163,9 +161,12 @@ func (a *grafanaAlerts) send(ctx context.Context, client *http.Client, cfg map[s
 		annotations["image_url"] = notif.ImageURL
 	}
 
-	ttl, err := strconv.Atoi(cfg["ttl"])
-	if err != nil || ttl < grafanaMinTTL {
-		ttl = grafanaDefaultTTL
+	// cfg["ttl"] was already normalized by grafanaParseTTL during parse, but
+	// re-derive the floor here too: an unparseable value zeroes out and then
+	// clamps to the minimum, which is the correct fallback behavior.
+	ttl, _ := strconv.Atoi(cfg["ttl"])
+	if ttl < grafanaMinTTL {
+		ttl = grafanaMinTTL
 	}
 
 	start := time.Now().UTC()
