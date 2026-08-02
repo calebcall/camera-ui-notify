@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **README no longer documents `grafana_irm_ttl`.** The field was removed from the code in 0.7.1
+  when IRM turned out to ignore `endsAt`, but its row survived in the config table — directly
+  contradicting the paragraph below it stating that IRM groups do not auto-resolve.
+
 ### Changed
 
 - **`package.json` description now lists every backend.** It had said "ntfy, Gotify, or a generic

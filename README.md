@@ -121,7 +121,6 @@ different services, so each has its own connection fields.
 | `grafana_alertname`     | no       | alertmanager  | `alertname` label. Defaults to `CameraUINotification`.    |
 | `grafana_ttl`           | no       | alertmanager  | Seconds before Alertmanager auto-resolves the alert. Default `900`, minimum `30`. |
 | `grafana_irm_url`       | yes      | irm           | Inbound webhook URL of an IRM / OnCall integration. The token is in the URL, so it is masked and kept out of every error message. |
-| `grafana_irm_ttl`       | no       | irm           | Seconds before the alert is eligible to auto-resolve. Default `300`, minimum `30`. Whether IRM acts on it depends on the integration's templates. |
 
 **Annotations** — `POST {server}/api/annotations` with a point-in-time, organization-wide
 annotation tagged `camera.ui`, `camera:<name>`, `severity:<level>`, plus your extra tags. Surface it
