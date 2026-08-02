@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -18,12 +19,19 @@ const (
 	// it needs a stable, recognizable default.
 	grafanaDefaultAlertname = "CameraUINotification"
 	// grafanaDefaultTTL is how long (seconds) an alert stays firing before
-	// Alertmanager auto-resolves it.
-	grafanaDefaultTTL = 300
+	// Alertmanager auto-resolves it. Alertmanager's own resolve_timeout
+	// default is 5 minutes, but this is deliberately longer: endsAt is
+	// computed from *this* host's clock, so a host running behind the
+	// Alertmanager silently loses any alert whose window is shorter than the
+	// drift. 15 minutes buys a margin the 5-minute default did not.
+	grafanaDefaultTTL = 900
 	// grafanaMinTTL floors the TTL. Below roughly half a minute an alert can
 	// resolve before a notification policy's group_wait has even elapsed, so
 	// it would never reach a receiver.
 	grafanaMinTTL = 30
+	// grafanaAlertmanagerAPIPath is appended to the configured base URL to
+	// reach Alertmanager's v2 publish endpoint.
+	grafanaAlertmanagerAPIPath = "/api/v2/alerts"
 )
 
 // Parse-time validation errors for this mode.
@@ -68,8 +76,8 @@ func (a *grafanaAlertmanager) schema() []sdk.JsonSchema {
 			Type:        sdk.JsonSchemaTypeString,
 			Key:         "grafana_am_url",
 			Title:       "Alertmanager URL",
-			Description: "Base URL of the Alertmanager itself, not of Grafana. Grafana's built-in Alertmanager cannot receive posted alerts, so this must be a standalone Alertmanager, Mimir/Cortex, or Grafana Cloud's hosted Alertmanager.",
-			Placeholder: "https://alertmanager.example.com",
+			Description: "Base URL of the Alertmanager itself, not of Grafana. Include any path prefix: Mimir and Grafana Cloud serve the API under /alertmanager (https://alertmanager-prod-xx.grafana.net/alertmanager), while a standalone Alertmanager serves it at the root (http://alertmanager:9093). Grafana's built-in Alertmanager cannot receive posted alerts at all.",
+			Placeholder: "https://alertmanager-prod-xx.grafana.net/alertmanager",
 			Required:    true,
 			Condition:   cond,
 		},
@@ -77,14 +85,14 @@ func (a *grafanaAlertmanager) schema() []sdk.JsonSchema {
 			Type:        sdk.JsonSchemaTypeString,
 			Key:         "grafana_am_user",
 			Title:       "Username",
-			Description: "Optional. Basic-auth username. For Grafana Cloud this is the Alertmanager instance ID.",
+			Description: "Optional. Basic-auth username. For Grafana Cloud this is the numeric Alertmanager instance ID, shown on the Alertmanager details page in the Cloud portal.",
 			Condition:   cond,
 		},
 		{
 			Type:        sdk.JsonSchemaTypeString,
 			Key:         "grafana_am_password",
 			Title:       "Password",
-			Description: "Optional. Basic-auth password. For Grafana Cloud this is an API token. Required if a username is set.",
+			Description: "Optional. Basic-auth password. For Grafana Cloud this is an Access Policy token with the alerts:write scope (glc_...), not a Grafana service-account token (glsa_...). Required if a username is set.",
 			Format:      sdk.StringFormatPassword,
 			Condition:   cond,
 		},
@@ -114,6 +122,12 @@ func (a *grafanaAlertmanager) parse(input map[string]any) (map[string]string, er
 	if amURL == "" {
 		return nil, errGrafanaAMURLRequired
 	}
+	amURL = strings.TrimRight(amURL, "/")
+	// Tolerate a pasted full endpoint. Alertmanager's own docs show the
+	// complete .../api/v2/alerts URL, so copying it here is the obvious
+	// mistake to make, and appending our own path would produce
+	// .../api/v2/alerts/api/v2/alerts.
+	amURL = strings.TrimSuffix(amURL, grafanaAlertmanagerAPIPath)
 	amURL = strings.TrimRight(amURL, "/")
 
 	user, _ := input["grafana_am_user"].(string)
@@ -195,10 +209,12 @@ func grafanaTTLSeconds(v any) (int, bool) {
 // alerts endpoint. It matches the postableAlert schema in Alertmanager's
 // OpenAPI spec: labels (required) and generatorURL from the alert
 // definition, plus startsAt, endsAt and annotations.
+// startsAt is deliberately omitted: Alertmanager stamps it with its own
+// clock, which is more trustworthy than ours and keeps the alert's start time
+// correct even on a host whose clock has drifted.
 type grafanaAlertPayload struct {
 	Labels       map[string]string `json:"labels"`
 	Annotations  map[string]string `json:"annotations"`
-	StartsAt     string            `json:"startsAt"`
 	EndsAt       string            `json:"endsAt"`
 	GeneratorURL string            `json:"generatorURL,omitempty"`
 }
@@ -238,12 +254,15 @@ func (a *grafanaAlertmanager) send(ctx context.Context, client *http.Client, cfg
 		ttl = grafanaMinTTL
 	}
 
-	start := time.Now().UTC()
+	// endsAt has to be absolute — Alertmanager's API has no relative form —
+	// so it is the one field that still depends on this host's clock. A host
+	// running more than ttl behind the Alertmanager sends an endsAt already
+	// in the past, and the alert is accepted with a 200 and resolved on
+	// arrival, never appearing as active. Keep the host's clock in NTP sync.
 	payload := []grafanaAlertPayload{{
 		Labels:      labels,
 		Annotations: annotations,
-		StartsAt:    start.Format(time.RFC3339),
-		EndsAt:      start.Add(time.Duration(ttl) * time.Second).Format(time.RFC3339),
+		EndsAt:      time.Now().UTC().Add(time.Duration(ttl) * time.Second).Format(time.RFC3339),
 		// generatorURL is Alertmanager's standard "where did this come from"
 		// link, surfaced as Source in its UI.
 		GeneratorURL: grafanaAbsoluteDeepLink(notif),
@@ -255,6 +274,15 @@ func (a *grafanaAlertmanager) send(ctx context.Context, client *http.Client, cfg
 			base64.StdEncoding.EncodeToString([]byte(user+":"+cfg["password"]))
 	}
 
-	return grafanaPostJSON(ctx, client, cfg["url"]+"/api/v2/alerts",
+	err := grafanaPostJSON(ctx, client, cfg["url"]+grafanaAlertmanagerAPIPath,
 		headers, payload, "grafana: alertmanager")
+
+	// A bare "404 page not found" is Go's default mux response and explains
+	// nothing. In practice it means the URL is missing the path prefix under
+	// which Mimir and Grafana Cloud serve the Alertmanager API.
+	var statusErr *grafanaStatusError
+	if errors.As(err, &statusErr) && statusErr.status == http.StatusNotFound {
+		return fmt.Errorf("%w (if this is Mimir or Grafana Cloud, the URL likely needs an /alertmanager path prefix; a standalone Alertmanager serves the API at the root)", err)
+	}
+	return err
 }

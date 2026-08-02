@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -65,8 +64,7 @@ func sendOneIRM(t *testing.T, notif sdk.Notification) decodedGrafanaIRM {
 	g := newGrafana()
 	g.client = srv.Client()
 
-	cfg := map[string]string{"mode": grafanaModeIRM, "url": srv.URL,
-		"ttl": strconv.Itoa(grafanaDefaultTTL)}
+	cfg := map[string]string{"mode": grafanaModeIRM, "url": srv.URL}
 	if err := g.Send(nil, cfg, notif); err != nil {
 		t.Fatalf("Send: unexpected error: %v", err)
 	}
@@ -119,24 +117,15 @@ func TestGrafanaIRMSchemaGating(t *testing.T) {
 		t.Errorf("grafana_irm_url Format = %q, want %q (the URL embeds the credential)", u.Format, sdk.StringFormatPassword)
 	}
 
-	ttl, ok := byKey["grafana_irm_ttl"]
-	if !ok {
-		t.Fatalf("schema missing %q field", "grafana_irm_ttl")
-	}
-	if ttl.Type != sdk.JsonSchemaTypeNumber {
-		t.Errorf("grafana_irm_ttl Type = %q, want %q", ttl.Type, sdk.JsonSchemaTypeNumber)
-	}
-	if ttl.DefaultValue != grafanaDefaultTTL {
-		t.Errorf("grafana_irm_ttl DefaultValue = %v, want %d", ttl.DefaultValue, grafanaDefaultTTL)
-	}
-	if ttl.Required {
-		t.Errorf("grafana_irm_ttl Required = true, want false")
-	}
-
-	// grafana_ttl belongs to alertmanager mode; a duplicate key here would
-	// collide in the flattened StorageSchema.
-	if _, ok := byKey["grafana_ttl"]; ok {
-		t.Errorf("IRM schema declares grafana_ttl, want the distinct grafana_irm_ttl key")
+	// IRM has no TTL knob. Its resolve condition is a template on the
+	// payload's status ({{ payload.status == "resolved" }}), so nothing in a
+	// single firing request can make a group close — only a second request
+	// would, and this plugin sends one stateless POST per event. A TTL field
+	// here would be a control that does nothing.
+	for _, k := range []string{"grafana_irm_ttl", "grafana_ttl"} {
+		if _, ok := byKey[k]; ok {
+			t.Errorf("IRM schema declares %q, want no TTL field (IRM ignores endsAt)", k)
+		}
 	}
 }
 
@@ -391,16 +380,11 @@ func TestGrafanaIRMSendEmitsAlertingEnvelope(t *testing.T) {
 	if _, err := time.Parse(time.RFC3339, a.StartsAt); err != nil {
 		t.Errorf("alerts[0].startsAt = %q, not RFC3339: %v", a.StartsAt, err)
 	}
-	end, err := time.Parse(time.RFC3339, a.EndsAt)
-	if err != nil {
-		t.Fatalf("alerts[0].endsAt = %q, not RFC3339: %v", a.EndsAt, err)
-	}
-	start, err := time.Parse(time.RFC3339, a.StartsAt)
-	if err != nil {
-		t.Fatalf("alerts[0].startsAt = %q, not RFC3339: %v", a.StartsAt, err)
-	}
-	if d := end.Sub(start); d != time.Duration(grafanaDefaultTTL)*time.Second {
-		t.Errorf("endsAt - startsAt = %v, want the default TTL of %ds", d, grafanaDefaultTTL)
+	// IRM ignores endsAt for resolution, so alerts carry the documented
+	// never-resolves sentinel rather than a future time that would imply an
+	// auto-close that never happens.
+	if a.EndsAt != grafanaIRMUnresolvedEndsAt {
+		t.Errorf("alerts[0].endsAt = %q, want the unresolved sentinel %q", a.EndsAt, grafanaIRMUnresolvedEndsAt)
 	}
 
 	if !reflect.DeepEqual(got.CommonLabels, wantLabels) {

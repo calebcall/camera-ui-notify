@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,11 +15,12 @@ import (
 )
 
 type decodedGrafanaAlert struct {
-	Labels       map[string]string `json:"labels"`
-	Annotations  map[string]string `json:"annotations"`
-	StartsAt     string            `json:"startsAt"`
-	EndsAt       string            `json:"endsAt"`
-	GeneratorURL string            `json:"generatorURL"`
+	Labels      map[string]string `json:"labels"`
+	Annotations map[string]string `json:"annotations"`
+	StartsAt    string            `json:"startsAt"`
+	EndsAt      string            `json:"endsAt"`
+
+	GeneratorURL string `json:"generatorURL"`
 }
 
 func TestGrafanaAlertmanagerParseRequiresURL(t *testing.T) {
@@ -46,8 +48,8 @@ func TestGrafanaAlertmanagerParseDoesNotRequireServerOrToken(t *testing.T) {
 	if cfg["alertname"] != grafanaDefaultAlertname {
 		t.Errorf("alertname = %q, want %q", cfg["alertname"], grafanaDefaultAlertname)
 	}
-	if cfg["ttl"] != "300" {
-		t.Errorf("ttl = %q, want %q", cfg["ttl"], "300")
+	if cfg["ttl"] != strconv.Itoa(grafanaDefaultTTL) {
+		t.Errorf("ttl = %q, want the default %d", cfg["ttl"], grafanaDefaultTTL)
 	}
 	if cfg["user"] != "" || cfg["password"] != "" {
 		t.Errorf("user/password = %q/%q, want both empty when unset", cfg["user"], cfg["password"])
@@ -279,20 +281,62 @@ func TestGrafanaAlertmanagerSendUsesBasicAuthWhenConfigured(t *testing.T) {
 	}
 }
 
-func TestGrafanaAlertmanagerSendEndsAtIsStartPlusTTL(t *testing.T) {
-	got, _, _ := sendOneAlert(t, map[string]string{"ttl": "600"}, sdk.Notification{Title: "x"})
-
-	start, err := time.Parse(time.RFC3339, got.StartsAt)
-	if err != nil {
-		t.Fatalf("startsAt %q is not RFC3339: %v", got.StartsAt, err)
+// startsAt is not sent at all — Alertmanager stamps it from its own clock, so
+// a drifted host cannot mis-date the alert's start.
+func TestGrafanaAlertmanagerSendOmitsStartsAt(t *testing.T) {
+	_, _, _, raw := sendOneAlertRaw(t, nil, sdk.Notification{Title: "x"})
+	if _, present := raw["startsAt"]; present {
+		t.Errorf("payload contains startsAt = %v, want it omitted so Alertmanager stamps it", raw["startsAt"])
 	}
+}
+
+func TestGrafanaAlertmanagerSendEndsAtIsNowPlusTTL(t *testing.T) {
+	before := time.Now().UTC()
+	got, _, _ := sendOneAlert(t, map[string]string{"ttl": "600"}, sdk.Notification{Title: "x"})
+	after := time.Now().UTC()
+
 	end, err := time.Parse(time.RFC3339, got.EndsAt)
 	if err != nil {
 		t.Fatalf("endsAt %q is not RFC3339: %v", got.EndsAt, err)
 	}
-	if d := end.Sub(start); d != 600*time.Second {
-		t.Errorf("endsAt - startsAt = %v, want 600s", d)
+	// RFC3339 truncates to the second, so allow a second of slack each way.
+	lo := before.Add(600 * time.Second).Add(-time.Second)
+	hi := after.Add(600 * time.Second).Add(time.Second)
+	if end.Before(lo) || end.After(hi) {
+		t.Errorf("endsAt = %v, want ~now+600s (between %v and %v)", end, lo, hi)
 	}
+}
+
+// sendOneAlertRaw is sendOneAlert plus the undecoded first alert object, for
+// assertions about field presence rather than value.
+func sendOneAlertRaw(t *testing.T, cfg map[string]string, notif sdk.Notification) (decodedGrafanaAlert, string, string, map[string]any) {
+	t.Helper()
+
+	var raw []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(b, &raw); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	g := newGrafana()
+	g.client = srv.Client()
+
+	full := map[string]string{"mode": grafanaModeAlertmanager, "url": srv.URL,
+		"alertname": grafanaDefaultAlertname, "ttl": strconv.Itoa(grafanaDefaultTTL)}
+	for k, v := range cfg {
+		full[k] = v
+	}
+	if err := g.Send(nil, full, notif); err != nil {
+		t.Fatalf("Send: unexpected error: %v", err)
+	}
+	if len(raw) != 1 {
+		t.Fatalf("posted %d alerts, want exactly 1", len(raw))
+	}
+	return decodedGrafanaAlert{}, "", "", raw[0]
 }
 
 func TestGrafanaAlertmanagerSendOmitsEmptyFields(t *testing.T) {
@@ -402,5 +446,84 @@ func TestGrafanaAlertmanagerCameraIDOmittedWhenItRepeatsTheLabel(t *testing.T) {
 	}
 	if _, ok := got.Labels["camera_id"]; ok {
 		t.Errorf("labels.camera_id present, want it omitted when identical to camera")
+	}
+}
+
+// Alertmanager's own docs show the complete .../api/v2/alerts URL, so pasting
+// it into the base-URL field is the obvious mistake; appending our own path
+// would produce .../api/v2/alerts/api/v2/alerts.
+func TestGrafanaAlertmanagerParseToleratesPastedFullEndpoint(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"https://am.example.com", "https://am.example.com"},
+		{"https://am.example.com/", "https://am.example.com"},
+		{"https://am.example.com/api/v2/alerts", "https://am.example.com"},
+		{"https://am.example.com/api/v2/alerts/", "https://am.example.com"},
+		{"https://am.grafana.net/alertmanager", "https://am.grafana.net/alertmanager"},
+		{"https://am.grafana.net/alertmanager/api/v2/alerts", "https://am.grafana.net/alertmanager"},
+	}
+
+	for _, tc := range cases {
+		cfg, err := newGrafanaAlertmanager().parse(map[string]any{"grafana_am_url": tc.in})
+		if err != nil {
+			t.Fatalf("parse(%q): unexpected error: %v", tc.in, err)
+		}
+		if cfg["url"] != tc.want {
+			t.Errorf("parse(%q) url = %q, want %q", tc.in, cfg["url"], tc.want)
+		}
+	}
+}
+
+// A bare "404 page not found" is Go's default mux body and explains nothing.
+// In practice it means the URL is missing the /alertmanager prefix that Mimir
+// and Grafana Cloud serve the API under.
+func TestGrafanaAlertmanagerSend404ExplainsTheMissingPrefix(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("404 page not found"))
+	}))
+	defer srv.Close()
+
+	g := newGrafana()
+	g.client = srv.Client()
+
+	cfg := map[string]string{"mode": grafanaModeAlertmanager, "url": srv.URL,
+		"alertname": grafanaDefaultAlertname, "ttl": "300"}
+	err := g.Send(nil, cfg, sdk.Notification{Title: "x"})
+	if err == nil {
+		t.Fatalf("got nil error, want error on 404")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error = %q, want it to mention status 404", err.Error())
+	}
+	if !strings.Contains(err.Error(), "/alertmanager") {
+		t.Errorf("error = %q, want it to hint at the missing /alertmanager prefix", err.Error())
+	}
+	if !strings.HasPrefix(err.Error(), "grafana: alertmanager: ") {
+		t.Errorf("error = %q, want the mode prefix preserved", err.Error())
+	}
+}
+
+// Other statuses must not pick up the 404 hint.
+func TestGrafanaAlertmanagerSendNon404HasNoPrefixHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("bad token"))
+	}))
+	defer srv.Close()
+
+	g := newGrafana()
+	g.client = srv.Client()
+
+	cfg := map[string]string{"mode": grafanaModeAlertmanager, "url": srv.URL,
+		"alertname": grafanaDefaultAlertname, "ttl": "300"}
+	err := g.Send(nil, cfg, sdk.Notification{Title: "x"})
+	if err == nil {
+		t.Fatalf("got nil error, want error on 401")
+	}
+	if strings.Contains(err.Error(), "/alertmanager path prefix") {
+		t.Errorf("error = %q, want no path-prefix hint on a 401", err.Error())
 	}
 }

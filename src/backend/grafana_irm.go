@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +22,15 @@ const (
 	// plugin's alert groups are identifiable as camera.ui's even when a
 	// notification names no camera.
 	grafanaIRMGroupKeyPrefix = "camera.ui"
+	// grafanaIRMUnresolvedEndsAt is the zero time Grafana documents as the
+	// endsAt of an alert that has not resolved. IRM decides whether a group
+	// is resolved from a template on the payload's status field — its
+	// default is {{ payload.status == "resolved" }} — and ignores endsAt
+	// entirely, so a group only closes when a *second* request arrives
+	// saying so. This plugin sends one stateless POST per event and no
+	// follow-up, so every alert it emits is permanently unresolved and is
+	// closed by hand in IRM.
+	grafanaIRMUnresolvedEndsAt = "0001-01-01T00:00:00Z"
 )
 
 // grafanaIRM delivers each notification to a Grafana IRM / OnCall inbound
@@ -44,8 +52,6 @@ func newGrafanaIRM() *grafanaIRM { return &grafanaIRM{} }
 func (i *grafanaIRM) id() string { return grafanaModeIRM }
 
 func (i *grafanaIRM) schema() []sdk.JsonSchema {
-	minTTL := float64(grafanaMinTTL)
-
 	return []sdk.JsonSchema{
 		{
 			Type:        sdk.JsonSchemaTypeString,
@@ -55,15 +61,6 @@ func (i *grafanaIRM) schema() []sdk.JsonSchema {
 			Format:      sdk.StringFormatPassword,
 			Required:    true,
 			Condition:   grafanaModeCondition(grafanaModeIRM),
-		},
-		{
-			Type:         sdk.JsonSchemaTypeNumber,
-			Key:          "grafana_irm_ttl",
-			Title:        "Auto-resolve after (seconds)",
-			Description:  "How long the alert stays firing before it is eligible to auto-resolve. Whether IRM honours this depends on the integration's templates; if your groups stay open, close them in IRM as before.",
-			DefaultValue: grafanaDefaultTTL,
-			Minimum:      &minTTL,
-			Condition:    grafanaModeCondition(grafanaModeIRM),
 		},
 	}
 }
@@ -75,10 +72,7 @@ func (i *grafanaIRM) parse(input map[string]any) (map[string]string, error) {
 		return nil, errors.New("grafana: irm: integration URL is required")
 	}
 
-	return map[string]string{
-		"url": url,
-		"ttl": strconv.Itoa(grafanaParseTTL(input["grafana_irm_ttl"])),
-	}, nil
+	return map[string]string{"url": url}, nil
 }
 
 // grafanaIRMPayload is the body posted to a Grafana IRM / OnCall integration.
@@ -170,23 +164,12 @@ func (i *grafanaIRM) send(ctx context.Context, client *http.Client, cfg map[stri
 
 	link := grafanaAbsoluteDeepLink(notif)
 
-	ttl, _ := strconv.Atoi(cfg["ttl"])
-	if ttl < grafanaMinTTL {
-		ttl = grafanaMinTTL
-	}
-	start := time.Now().UTC()
-
 	alert := grafanaIRMAlert{
 		Status:      "firing",
 		Labels:      labels,
 		Annotations: annotations,
-		StartsAt:    start.Format(time.RFC3339),
-		// A future endsAt is how Alertmanager expresses "resolves on its own
-		// at this time", and IRM's grafana_alerting templates read the same
-		// envelope. Whether IRM actually acts on it is unverified — if it
-		// does not, the group simply stays open as it did before, which is
-		// the pre-0.7.0 behaviour rather than a regression.
-		EndsAt: start.Add(time.Duration(ttl) * time.Second).Format(time.RFC3339),
+		StartsAt:    time.Now().UTC().Format(time.RFC3339),
+		EndsAt:      grafanaIRMUnresolvedEndsAt,
 		// generatorURL is where Grafana points "see the source of this
 		// alert", which for us is the camera page the event came from.
 		GeneratorURL: link,
