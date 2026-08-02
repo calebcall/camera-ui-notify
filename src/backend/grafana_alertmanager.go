@@ -19,8 +19,12 @@ const (
 	// it needs a stable, recognizable default.
 	grafanaDefaultAlertname = "CameraUINotification"
 	// grafanaDefaultTTL is how long (seconds) an alert stays firing before
-	// Alertmanager auto-resolves it.
-	grafanaDefaultTTL = 300
+	// Alertmanager auto-resolves it. Alertmanager's own resolve_timeout
+	// default is 5 minutes, but this is deliberately longer: endsAt is
+	// computed from *this* host's clock, so a host running behind the
+	// Alertmanager silently loses any alert whose window is shorter than the
+	// drift. 15 minutes buys a margin the 5-minute default did not.
+	grafanaDefaultTTL = 900
 	// grafanaMinTTL floors the TTL. Below roughly half a minute an alert can
 	// resolve before a notification policy's group_wait has even elapsed, so
 	// it would never reach a receiver.
@@ -205,10 +209,12 @@ func grafanaTTLSeconds(v any) (int, bool) {
 // alerts endpoint. It matches the postableAlert schema in Alertmanager's
 // OpenAPI spec: labels (required) and generatorURL from the alert
 // definition, plus startsAt, endsAt and annotations.
+// startsAt is deliberately omitted: Alertmanager stamps it with its own
+// clock, which is more trustworthy than ours and keeps the alert's start time
+// correct even on a host whose clock has drifted.
 type grafanaAlertPayload struct {
 	Labels       map[string]string `json:"labels"`
 	Annotations  map[string]string `json:"annotations"`
-	StartsAt     string            `json:"startsAt"`
 	EndsAt       string            `json:"endsAt"`
 	GeneratorURL string            `json:"generatorURL,omitempty"`
 }
@@ -248,12 +254,15 @@ func (a *grafanaAlertmanager) send(ctx context.Context, client *http.Client, cfg
 		ttl = grafanaMinTTL
 	}
 
-	start := time.Now().UTC()
+	// endsAt has to be absolute — Alertmanager's API has no relative form —
+	// so it is the one field that still depends on this host's clock. A host
+	// running more than ttl behind the Alertmanager sends an endsAt already
+	// in the past, and the alert is accepted with a 200 and resolved on
+	// arrival, never appearing as active. Keep the host's clock in NTP sync.
 	payload := []grafanaAlertPayload{{
 		Labels:      labels,
 		Annotations: annotations,
-		StartsAt:    start.Format(time.RFC3339),
-		EndsAt:      start.Add(time.Duration(ttl) * time.Second).Format(time.RFC3339),
+		EndsAt:      time.Now().UTC().Add(time.Duration(ttl) * time.Second).Format(time.RFC3339),
 		// generatorURL is Alertmanager's standard "where did this come from"
 		// link, surfaced as Source in its UI.
 		GeneratorURL: grafanaAbsoluteDeepLink(notif),

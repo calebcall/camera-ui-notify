@@ -119,7 +119,7 @@ different services, so each has its own connection fields.
 | `grafana_am_user`       | no       | alertmanager  | Basic-auth username. For Grafana Cloud, the numeric Alertmanager instance ID. |
 | `grafana_am_password`   | no       | alertmanager  | Basic-auth password. For Grafana Cloud, an Access Policy token with the `alerts:write` scope. Required if a username is set, and vice versa. |
 | `grafana_alertname`     | no       | alertmanager  | `alertname` label. Defaults to `CameraUINotification`.    |
-| `grafana_ttl`           | no       | alertmanager  | Seconds before Alertmanager auto-resolves the alert. Default `300`, minimum `30`. |
+| `grafana_ttl`           | no       | alertmanager  | Seconds before Alertmanager auto-resolves the alert. Default `900`, minimum `30`. |
 | `grafana_irm_url`       | yes      | irm           | Inbound webhook URL of an IRM / OnCall integration. The token is in the URL, so it is masked and kept out of every error message. |
 | `grafana_irm_ttl`       | no       | irm           | Seconds before the alert is eligible to auto-resolve. Default `300`, minimum `30`. Whether IRM acts on it depends on the integration's templates. |
 
@@ -156,8 +156,19 @@ Cloud's hosted Alertmanager (username = instance ID, password = API token).
 > scope, created under Access Policies — *not* a Grafana service-account token (`glsa_…`), which
 > authenticates to Grafana rather than to the Alertmanager.
 
-`endsAt` is `startsAt + grafana_ttl`, which lets Alertmanager auto-resolve the alert without a
-second request. Labels are `alertname`, `source=camera.ui`, `severity` (camera.ui's own four
+`endsAt` is `now + grafana_ttl`, which lets Alertmanager auto-resolve the alert without a
+second request. `startsAt` is deliberately not sent — Alertmanager stamps it from its own clock.
+
+> **If sends succeed but no alert appears, check the clock.** `endsAt` has to be absolute
+> (Alertmanager's API has no relative form), so it is computed from the camera.ui host's clock. A
+> host running more than `grafana_ttl` *behind* the Alertmanager sends an `endsAt` already in the
+> past: the alert is accepted with a `200`, resolved on arrival, and never shows as active. The
+> symptom is a clean `notify: delivered` in the log and an empty
+> `GET {alertmanager}/api/v2/alerts`. Keep the host in NTP sync. The 900-second default exists to
+> give that failure some margin.
+>
+> Second, gentler trap: alerts self-resolve after `grafana_ttl` and drop off the active list, so
+> when testing, look within the window rather than an hour later. Labels are `alertname`, `source=camera.ui`, `severity` (camera.ui's own four
 levels, verbatim), `camera`, `camera_id`, and a unique `event_id` — the last of these matters, because
 Alertmanager deduplicates on the label set and without it two detections on one camera inside the
 TTL window would collapse into a single alert. The absolute deep link becomes `generatorURL`,

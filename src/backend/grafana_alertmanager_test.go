@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,11 +15,12 @@ import (
 )
 
 type decodedGrafanaAlert struct {
-	Labels       map[string]string `json:"labels"`
-	Annotations  map[string]string `json:"annotations"`
-	StartsAt     string            `json:"startsAt"`
-	EndsAt       string            `json:"endsAt"`
-	GeneratorURL string            `json:"generatorURL"`
+	Labels      map[string]string `json:"labels"`
+	Annotations map[string]string `json:"annotations"`
+	StartsAt    string            `json:"startsAt"`
+	EndsAt      string            `json:"endsAt"`
+
+	GeneratorURL string `json:"generatorURL"`
 }
 
 func TestGrafanaAlertmanagerParseRequiresURL(t *testing.T) {
@@ -46,8 +48,8 @@ func TestGrafanaAlertmanagerParseDoesNotRequireServerOrToken(t *testing.T) {
 	if cfg["alertname"] != grafanaDefaultAlertname {
 		t.Errorf("alertname = %q, want %q", cfg["alertname"], grafanaDefaultAlertname)
 	}
-	if cfg["ttl"] != "300" {
-		t.Errorf("ttl = %q, want %q", cfg["ttl"], "300")
+	if cfg["ttl"] != strconv.Itoa(grafanaDefaultTTL) {
+		t.Errorf("ttl = %q, want the default %d", cfg["ttl"], grafanaDefaultTTL)
 	}
 	if cfg["user"] != "" || cfg["password"] != "" {
 		t.Errorf("user/password = %q/%q, want both empty when unset", cfg["user"], cfg["password"])
@@ -279,20 +281,62 @@ func TestGrafanaAlertmanagerSendUsesBasicAuthWhenConfigured(t *testing.T) {
 	}
 }
 
-func TestGrafanaAlertmanagerSendEndsAtIsStartPlusTTL(t *testing.T) {
-	got, _, _ := sendOneAlert(t, map[string]string{"ttl": "600"}, sdk.Notification{Title: "x"})
-
-	start, err := time.Parse(time.RFC3339, got.StartsAt)
-	if err != nil {
-		t.Fatalf("startsAt %q is not RFC3339: %v", got.StartsAt, err)
+// startsAt is not sent at all — Alertmanager stamps it from its own clock, so
+// a drifted host cannot mis-date the alert's start.
+func TestGrafanaAlertmanagerSendOmitsStartsAt(t *testing.T) {
+	_, _, _, raw := sendOneAlertRaw(t, nil, sdk.Notification{Title: "x"})
+	if _, present := raw["startsAt"]; present {
+		t.Errorf("payload contains startsAt = %v, want it omitted so Alertmanager stamps it", raw["startsAt"])
 	}
+}
+
+func TestGrafanaAlertmanagerSendEndsAtIsNowPlusTTL(t *testing.T) {
+	before := time.Now().UTC()
+	got, _, _ := sendOneAlert(t, map[string]string{"ttl": "600"}, sdk.Notification{Title: "x"})
+	after := time.Now().UTC()
+
 	end, err := time.Parse(time.RFC3339, got.EndsAt)
 	if err != nil {
 		t.Fatalf("endsAt %q is not RFC3339: %v", got.EndsAt, err)
 	}
-	if d := end.Sub(start); d != 600*time.Second {
-		t.Errorf("endsAt - startsAt = %v, want 600s", d)
+	// RFC3339 truncates to the second, so allow a second of slack each way.
+	lo := before.Add(600 * time.Second).Add(-time.Second)
+	hi := after.Add(600 * time.Second).Add(time.Second)
+	if end.Before(lo) || end.After(hi) {
+		t.Errorf("endsAt = %v, want ~now+600s (between %v and %v)", end, lo, hi)
 	}
+}
+
+// sendOneAlertRaw is sendOneAlert plus the undecoded first alert object, for
+// assertions about field presence rather than value.
+func sendOneAlertRaw(t *testing.T, cfg map[string]string, notif sdk.Notification) (decodedGrafanaAlert, string, string, map[string]any) {
+	t.Helper()
+
+	var raw []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(b, &raw); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	g := newGrafana()
+	g.client = srv.Client()
+
+	full := map[string]string{"mode": grafanaModeAlertmanager, "url": srv.URL,
+		"alertname": grafanaDefaultAlertname, "ttl": strconv.Itoa(grafanaDefaultTTL)}
+	for k, v := range cfg {
+		full[k] = v
+	}
+	if err := g.Send(nil, full, notif); err != nil {
+		t.Fatalf("Send: unexpected error: %v", err)
+	}
+	if len(raw) != 1 {
+		t.Fatalf("posted %d alerts, want exactly 1", len(raw))
+	}
+	return decodedGrafanaAlert{}, "", "", raw[0]
 }
 
 func TestGrafanaAlertmanagerSendOmitsEmptyFields(t *testing.T) {

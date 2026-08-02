@@ -26,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`glc_...`) with the `alerts:write` scope — *not* a Grafana service-account token (`glsa_...`),
   which authenticates to Grafana rather than to the Alertmanager.
 
+### Changed
+
+- **Alertmanager mode no longer sends `startsAt`**, letting Alertmanager stamp it from its own
+  clock. The alert's start time is now correct even on a host whose clock has drifted.
+- **`grafana_ttl` default raised from 300 to 900 seconds.** `endsAt` must be absolute — the
+  Alertmanager API has no relative form — so it is still derived from the camera.ui host's clock. A
+  host running more than `grafana_ttl` behind the Alertmanager sends an `endsAt` already in the
+  past, and the alert is accepted with a `200`, resolved on arrival, and never appears as active —
+  a silent no-op that reads as success. 15 minutes gives that failure real margin where 5 did not,
+  and the README now names the symptom and the fix (keep the host in NTP sync).
+
 ### Removed
 
 - **`grafana_irm_ttl` and the IRM `endsAt` experiment, both added in 0.7.0.** They did nothing. IRM
