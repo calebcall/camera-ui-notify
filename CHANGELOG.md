@@ -5,6 +5,25 @@ All notable changes to **Notify** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-01
+
+### Added
+
+- **Grafana backend** with three delivery modes selected by a **Mode** field:
+  - **Annotations** — a point-in-time, organization-wide annotation via `POST /api/annotations`,
+    tagged `camera.ui` / `camera:<id>` / `severity:<level>` plus any extra tags, so dashboards can
+    surface camera events through a tag-filtered annotation query.
+  - **Alerts** — a firing alert via `POST /api/alertmanager/grafana/api/v2/alerts`, routed by your
+    existing notification policies. `endsAt` is `startsAt + grafana_ttl` (default 300s) so Grafana
+    auto-resolves it with no second request, and a unique `event_id` label keeps Alertmanager from
+    deduplicating two detections on the same camera into one alert.
+  - **IRM** — one alert group per event via a Grafana IRM / OnCall inbound webhook, using the
+    formatted-webhook field set. The only Grafana mode that renders the snapshot, and only when the
+    publisher supplied a hosted `ImageURL`.
+
+  The integration URL for IRM embeds its own token, so it is a masked field and is stripped from
+  every error message, including transport failures.
+
 ## [0.5.6] - 2026-08-01
 
 ### Changed
