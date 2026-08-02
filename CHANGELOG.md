@@ -5,6 +5,41 @@ All notable changes to **Notify** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-08-02
+
+### Fixed
+
+- **Alertmanager mode: documented the required path prefix.** Mimir and Grafana Cloud serve the
+  Alertmanager API under a prefix (`/alertmanager` by default); a standalone Alertmanager serves it
+  at the root. 0.7.0's field placeholder and README both showed a bare host, so configuring it the
+  documented way produced `404 page not found` on every send. The README now gives both forms side
+  by side, and the field description and placeholder show the Grafana Cloud shape. No code was
+  wrong here — the documentation was.
+- **A 404 from Alertmanager now explains itself.** Go's default mux answers with a bare
+  `404 page not found`, which says nothing about the missing prefix that caused it. The error now
+  adds that hint. Other statuses are untouched.
+- **A pasted full endpoint is accepted.** Alertmanager's own docs show the complete
+  `.../api/v2/alerts` URL, so copying it into the base-URL field is the obvious mistake; a trailing
+  `/api/v2/alerts` is now trimmed rather than producing `/api/v2/alerts/api/v2/alerts`.
+- **Documented where Grafana Cloud Alertmanager credentials come from.** The username is the
+  numeric Alertmanager instance ID from the Cloud portal; the password is an Access Policy token
+  (`glc_...`) with the `alerts:write` scope — *not* a Grafana service-account token (`glsa_...`),
+  which authenticates to Grafana rather than to the Alertmanager.
+
+### Removed
+
+- **`grafana_irm_ttl` and the IRM `endsAt` experiment, both added in 0.7.0.** They did nothing. IRM
+  decides whether a group is resolved from a template on the payload's status — its default is
+  `{{ payload.status == "resolved" }}` — and ignores `endsAt` entirely, so no value in a single
+  firing request can close a group; only a second request can. IRM alerts once again carry the
+  documented never-resolves sentinel `0001-01-01T00:00:00Z`, which states the actual behaviour
+  instead of implying an auto-close that never happens, and the README says plainly that groups are
+  closed by hand.
+
+  A delayed resolve was considered and rejected: it would require a background timer and per-event
+  state in a plugin that is otherwise one stateless POST per event, and a restart would strand the
+  group open regardless.
+
 ## [0.7.0] - 2026-08-02
 
 ### Changed

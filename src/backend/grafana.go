@@ -247,10 +247,28 @@ func grafanaPostJSON(ctx context.Context, client *http.Client, url string, heade
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		const maxBody = 512
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
-		return fmt.Errorf("%s: server responded %d: %s", errPrefix, resp.StatusCode, strings.TrimSpace(string(b)))
+		return &grafanaStatusError{
+			prefix: errPrefix,
+			status: resp.StatusCode,
+			body:   strings.TrimSpace(string(b)),
+		}
 	}
 
 	return nil
+}
+
+// grafanaStatusError is the error grafanaPostJSON returns for a non-2xx
+// response. It carries the status separately so a mode can recognise a code
+// it knows how to explain and add a hint — a bare "404 page not found" from
+// an Alertmanager says nothing about the missing path prefix that caused it.
+type grafanaStatusError struct {
+	prefix string
+	status int
+	body   string
+}
+
+func (e *grafanaStatusError) Error() string {
+	return fmt.Sprintf("%s: server responded %d: %s", e.prefix, e.status, e.body)
 }
 
 // grafanaEventID returns a value unique to this notification, used as the

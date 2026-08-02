@@ -404,3 +404,82 @@ func TestGrafanaAlertmanagerCameraIDOmittedWhenItRepeatsTheLabel(t *testing.T) {
 		t.Errorf("labels.camera_id present, want it omitted when identical to camera")
 	}
 }
+
+// Alertmanager's own docs show the complete .../api/v2/alerts URL, so pasting
+// it into the base-URL field is the obvious mistake; appending our own path
+// would produce .../api/v2/alerts/api/v2/alerts.
+func TestGrafanaAlertmanagerParseToleratesPastedFullEndpoint(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"https://am.example.com", "https://am.example.com"},
+		{"https://am.example.com/", "https://am.example.com"},
+		{"https://am.example.com/api/v2/alerts", "https://am.example.com"},
+		{"https://am.example.com/api/v2/alerts/", "https://am.example.com"},
+		{"https://am.grafana.net/alertmanager", "https://am.grafana.net/alertmanager"},
+		{"https://am.grafana.net/alertmanager/api/v2/alerts", "https://am.grafana.net/alertmanager"},
+	}
+
+	for _, tc := range cases {
+		cfg, err := newGrafanaAlertmanager().parse(map[string]any{"grafana_am_url": tc.in})
+		if err != nil {
+			t.Fatalf("parse(%q): unexpected error: %v", tc.in, err)
+		}
+		if cfg["url"] != tc.want {
+			t.Errorf("parse(%q) url = %q, want %q", tc.in, cfg["url"], tc.want)
+		}
+	}
+}
+
+// A bare "404 page not found" is Go's default mux body and explains nothing.
+// In practice it means the URL is missing the /alertmanager prefix that Mimir
+// and Grafana Cloud serve the API under.
+func TestGrafanaAlertmanagerSend404ExplainsTheMissingPrefix(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("404 page not found"))
+	}))
+	defer srv.Close()
+
+	g := newGrafana()
+	g.client = srv.Client()
+
+	cfg := map[string]string{"mode": grafanaModeAlertmanager, "url": srv.URL,
+		"alertname": grafanaDefaultAlertname, "ttl": "300"}
+	err := g.Send(nil, cfg, sdk.Notification{Title: "x"})
+	if err == nil {
+		t.Fatalf("got nil error, want error on 404")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error = %q, want it to mention status 404", err.Error())
+	}
+	if !strings.Contains(err.Error(), "/alertmanager") {
+		t.Errorf("error = %q, want it to hint at the missing /alertmanager prefix", err.Error())
+	}
+	if !strings.HasPrefix(err.Error(), "grafana: alertmanager: ") {
+		t.Errorf("error = %q, want the mode prefix preserved", err.Error())
+	}
+}
+
+// Other statuses must not pick up the 404 hint.
+func TestGrafanaAlertmanagerSendNon404HasNoPrefixHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("bad token"))
+	}))
+	defer srv.Close()
+
+	g := newGrafana()
+	g.client = srv.Client()
+
+	cfg := map[string]string{"mode": grafanaModeAlertmanager, "url": srv.URL,
+		"alertname": grafanaDefaultAlertname, "ttl": "300"}
+	err := g.Send(nil, cfg, sdk.Notification{Title: "x"})
+	if err == nil {
+		t.Fatalf("got nil error, want error on 401")
+	}
+	if strings.Contains(err.Error(), "/alertmanager path prefix") {
+		t.Errorf("error = %q, want no path-prefix hint on a 401", err.Error())
+	}
+}

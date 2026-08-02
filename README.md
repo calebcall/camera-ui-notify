@@ -115,9 +115,9 @@ different services, so each has its own connection fields.
 | `grafana_server`        | yes      | annotations   | Base URL of the Grafana instance. Trailing `/` trimmed.   |
 | `grafana_token`         | yes      | annotations   | Service-account token, sent as `Authorization: Bearer <token>`. |
 | `grafana_tags`          | no       | annotations   | Comma-separated extra tags.                               |
-| `grafana_am_url`        | yes      | alertmanager  | Base URL of the **Alertmanager**, not of Grafana. Trailing `/` trimmed. |
-| `grafana_am_user`       | no       | alertmanager  | Basic-auth username. For Grafana Cloud, the Alertmanager instance ID. |
-| `grafana_am_password`   | no       | alertmanager  | Basic-auth password. For Grafana Cloud, an API token. Required if a username is set, and vice versa. |
+| `grafana_am_url`        | yes      | alertmanager  | Base URL of the **Alertmanager**, not of Grafana — **including any path prefix** (see below). A pasted `.../api/v2/alerts` endpoint is accepted and trimmed. |
+| `grafana_am_user`       | no       | alertmanager  | Basic-auth username. For Grafana Cloud, the numeric Alertmanager instance ID. |
+| `grafana_am_password`   | no       | alertmanager  | Basic-auth password. For Grafana Cloud, an Access Policy token with the `alerts:write` scope. Required if a username is set, and vice versa. |
 | `grafana_alertname`     | no       | alertmanager  | `alertname` label. Defaults to `CameraUINotification`.    |
 | `grafana_ttl`           | no       | alertmanager  | Seconds before Alertmanager auto-resolves the alert. Default `300`, minimum `30`. |
 | `grafana_irm_url`       | yes      | irm           | Inbound webhook URL of an IRM / OnCall integration. The token is in the URL, so it is masked and kept out of every error message. |
@@ -140,6 +140,22 @@ Cloud's hosted Alertmanager (username = instance ID, password = API token).
 > rule evaluation. Point this at a real Alertmanager. (Versions 0.6.0–0.6.1 targeted Grafana here
 > and always failed with `400 bad request data`.)
 
+> **Get the URL right — this is the most common way to misconfigure this mode.** Mimir and Grafana
+> Cloud serve the Alertmanager API under a path prefix, `/alertmanager` by default; a standalone
+> Alertmanager serves it at the root. Omit the prefix and every send fails with a bare
+> `404 page not found`.
+>
+> | Target | Enter | Resulting POST |
+> | --- | --- | --- |
+> | Grafana Cloud / Mimir | `https://alertmanager-prod-xx.grafana.net/alertmanager` | `…/alertmanager/api/v2/alerts` |
+> | Standalone Alertmanager | `http://alertmanager:9093` | `…/api/v2/alerts` |
+>
+> **Grafana Cloud credentials** come from two different places. The **username** is the numeric
+> Alertmanager instance ID, shown with the URL on the Alertmanager details page in the Cloud
+> portal. The **password** is an **Access Policy token** (`glc_…`) carrying the `alerts:write`
+> scope, created under Access Policies — *not* a Grafana service-account token (`glsa_…`), which
+> authenticates to Grafana rather than to the Alertmanager.
+
 `endsAt` is `startsAt + grafana_ttl`, which lets Alertmanager auto-resolve the alert without a
 second request. Labels are `alertname`, `source=camera.ui`, `severity` (camera.ui's own four
 levels, verbatim), `camera`, `camera_id`, and a unique `event_id` — the last of these matters, because
@@ -157,11 +173,14 @@ labels/annotations/`generatorURL`/`imageURL`, `groupKey`, `commonLabels`, `exter
 
 Alert groups are keyed **per camera** — `camera.ui:<camera>`, falling back to `camera.ui` for a
 notification that names no camera — so one busy camera can't bury a quiet one. Within a group each
-event keeps its own `fingerprint`, so detections stay individually visible. Each alert carries a
-future `endsAt` (`startsAt + grafana_irm_ttl`), the same way Alertmanager mode expresses
-"resolves on its own at this time"; whether IRM acts on it depends on the integration's templates,
-and if it does not, groups stay open until you resolve them by hand. There is still no follow-up
-`state: "ok"` request — every mode is one stateless POST per event.
+event keeps its own `fingerprint`, so detections stay individually visible.
+
+**IRM groups do not auto-resolve.** IRM decides that from a template on the payload's status — its
+default is `{{ payload.status == "resolved" }}` — so a group closes only when a *second* request
+arrives saying so. `endsAt` is ignored, which is why alerts carry the documented never-resolves
+sentinel rather than a future time that would imply a close that never comes. This plugin sends one
+stateless POST per event and no follow-up, by design: a delayed resolve would mean a background
+timer and per-event state, and a restart would strand the group open anyway. Close them in IRM.
 
 > **Camera names:** `camera` carries the camera's display name, taken from `Data["cameraName"]`
 > when a publisher supplies one and otherwise from the deep link, which camera.ui routes by name.
