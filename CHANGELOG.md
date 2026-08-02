@@ -5,6 +5,75 @@ All notable changes to **Notify** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-02
+
+### Changed
+
+- **The Grafana `alerts` mode is renamed `alertmanager` and now posts to an Alertmanager directly**
+  ([#33](https://github.com/calebcall/camera-ui-notify/issues/33)). **This mode requires
+  reconfiguration.** It never worked in 0.6.0 or 0.6.1 — every send failed with
+  `400 bad request data` — so no working setup is disturbed.
+
+  The mode targeted `{grafanaServer}/api/alertmanager/grafana/api/v2/alerts` on the assumption that
+  Grafana's built-in Alertmanager accepts injected alerts. It does not. Grafana's route table
+  declares built-in-Alertmanager operations with a literal `grafana` path segment and external ones
+  with `{DatasourceUID}`; there is a `GET /alertmanager/grafana/api/v2/alerts` but **no `POST`
+  equivalent** — reads are supported, writes are not. The forking handler
+  (`pkg/services/ngalert/api/forking_alertmanager.go`) resolves an Alertmanager *datasource* by UID
+  and always returns the external proxy, never the built-in service, so a request naming `grafana`
+  as the UID matches no datasource and fails. Grafana-managed alerts can only originate from
+  Grafana's own rule evaluation; there is no supported path to inject one.
+
+  The mode now addresses an Alertmanager's own v2 API — `POST {alertmanager}/api/v2/alerts` — with
+  optional basic auth. That works with a standalone Prometheus Alertmanager, Mimir/Cortex, and
+  Grafana Cloud's hosted Alertmanager (username = instance ID, password = API token). The name
+  follows the behaviour: this mode talks to Alertmanager, not to Grafana.
+
+  Config changes for this mode: `grafana_server` and `grafana_token` are no longer used (they are
+  now annotations-only) and are replaced by `grafana_am_url` plus the optional `grafana_am_user` /
+  `grafana_am_password` pair. Setting only one of the two credential fields is rejected at parse
+  time rather than surfacing as a confusing 401. `grafana_alertname` and `grafana_ttl` are
+  unchanged, and the alert payload itself is unchanged — it already matched Alertmanager's
+  documented `postableAlert` schema; only the destination was wrong.
+
+- **`grafana_server` / `grafana_token` are now gated to annotations mode only**, since it is the
+  one mode that addresses a Grafana instance. They no longer use the `in` condition operator.
+
+### Fixed
+
+- **Grafana modes now label the camera with its display name instead of its UUID**
+  ([#34](https://github.com/calebcall/camera-ui-notify/issues/34)). `Data["cameraId"]` is a UUID for
+  the publishers seen so far, so alerts read `camera=07614b1d-d5de-48b7-bbb2-592a64a97ead` and IRM
+  grouped under `camera.ui:07614b1d-…`, which is unusable at a glance.
+
+  The name is resolved cheapest-first: `Data["cameraName"]` if a publisher supplies one, else the
+  camera segment of the deep link (camera.ui routes cameras by display name, so this is `Patio`
+  while the id is a UUID), else the raw id so a notification with neither still gets a label. No
+  RPC and no camera lookup — `DeviceManager.GetCamera` would also resolve a name but builds a full
+  camera-device proxy and calls `init()` on it, which is heavy and side-effecting for a Hub plugin
+  that owns no cameras.
+
+  This reaches the annotations `camera:<name>` tag, the alertmanager `camera` label, and the IRM
+  `camera` label, `groupLabels` and `groupKey`. Alertmanager and IRM modes additionally keep the
+  raw id as `camera_id` (omitted when it would merely repeat `camera`), since names change and ids
+  do not — routing rules that must survive a rename can match on that.
+
+  **IRM alert groups will regroup**: existing groups keyed `camera.ui:<uuid>` are replaced by
+  `camera.ui:<name>`.
+
+- **`grafana_ttl` no longer sets a `Step`.** With `min=30 step=30`, an HTML5 number input rejects
+  legitimate values such as 100 or 450. Nothing about a TTL needs 30-second granularity.
+
+### Added
+
+- **`grafana_irm_ttl`** (default `300`, minimum `30`). IRM alerts now carry a future `endsAt`
+  (`startsAt + grafana_irm_ttl`) instead of the never-resolves sentinel `0001-01-01T00:00:00Z`.
+  That is how Alertmanager expresses "resolves on its own at this time", and IRM's
+  `grafana_alerting` templates read the same envelope — but whether IRM actually acts on it is
+  **unverified**. If it does not, groups stay open until closed by hand, exactly as before, so this
+  is an improvement-or-no-change rather than a risk. Still one stateless POST per event: there is
+  no follow-up `state: "ok"` request and no background timer.
+
 ## [0.6.1] - 2026-08-02
 
 ### Fixed

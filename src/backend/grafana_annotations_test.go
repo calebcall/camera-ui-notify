@@ -222,3 +222,35 @@ func TestGrafanaAnnotationsSendNon2xxReturnsError(t *testing.T) {
 		t.Errorf("error = %q, want the %q prefix", err.Error(), "grafana: annotations: ")
 	}
 }
+
+// #34: the camera tag should be readable rather than a UUID.
+func TestGrafanaAnnotationsCameraTagPrefersReadableName(t *testing.T) {
+	var gotBody decodedGrafanaAnnotation
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &gotBody)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	g := newGrafana()
+	g.client = srv.Client()
+
+	cfg := map[string]string{"mode": grafanaModeAnnotations, "server": srv.URL, "token": "tk"}
+	notif := sdk.Notification{
+		Title:    "Patio — Audio",
+		Severity: sdk.SeverityInfo,
+		DeepLink: "https://cam.example/cameras/Patio?startTs=123",
+		Data:     map[string]string{"cameraId": "07614b1d-d5de-48b7-bbb2-592a64a97ead"},
+	}
+
+	if err := g.Send(nil, cfg, notif); err != nil {
+		t.Fatalf("Send: unexpected error: %v", err)
+	}
+
+	want := []string{"camera.ui", "camera:Patio", "severity:info"}
+	if !reflect.DeepEqual(gotBody.Tags, want) {
+		t.Errorf("tags = %v, want %v", gotBody.Tags, want)
+	}
+}

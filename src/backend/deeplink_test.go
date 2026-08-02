@@ -73,3 +73,29 @@ func TestDeepLinkLabel(t *testing.T) {
 		})
 	}
 }
+
+func TestDeepLinkCameraSegment(t *testing.T) {
+	cases := []struct {
+		name     string
+		deepLink string
+		want     string
+	}{
+		{"absolute camera link", "https://cam.example/cameras/Patio?startTs=123", "Patio"},
+		{"router-relative camera link", "/cameras/Patio", "Patio"},
+		{"sub-path mount", "https://cam.example/camera-ui/cameras/Patio", "Patio"},
+		{"percent-encoded name is decoded", "https://cam.example/cameras/Front%20Door", "Front Door"},
+		{"camera list page has no segment", "/cameras", ""},
+		{"trailing slash has no segment", "/cameras/", ""},
+		{"non-camera route", "/settings/notifications", ""},
+		{"empty deep link", "", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := DeepLinkCameraSegment(sdk.Notification{DeepLink: tc.deepLink})
+			if got != tc.want {
+				t.Errorf("DeepLinkCameraSegment(%q) = %q, want %q", tc.deepLink, got, tc.want)
+			}
+		})
+	}
+}

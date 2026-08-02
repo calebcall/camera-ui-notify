@@ -105,32 +105,47 @@ Delivery: a rich embed (title, body, severity color — blue/yellow/red) with th
 
 ### Grafana
 
-Delivers to a [Grafana](https://grafana.com) instance. Grafana is not one ingest endpoint, so a
-**Mode** field selects which surface receives the notification.
+Delivers to the [Grafana](https://grafana.com) ecosystem. This is not one ingest endpoint, so a
+**Mode** field selects which surface receives the notification — and the three modes address three
+different services, so each has its own connection fields.
 
-| Field                   | Required | Mode                    | Notes                                                    |
-| ----------------------- | -------- | ----------------------- | --------------------------------------------------------- |
-| `grafana_mode`          | yes      | —                       | `annotations`, `alerts`, or `irm`. Defaults to `annotations`. |
-| `grafana_server`        | yes      | annotations, alerts     | Base URL of the Grafana instance. Trailing `/` trimmed.   |
-| `grafana_token`         | yes      | annotations, alerts     | Service-account token, sent as `Authorization: Bearer <token>`. |
-| `grafana_tags`          | no       | annotations             | Comma-separated extra tags.                               |
-| `grafana_alertname`     | no       | alerts                  | `alertname` label. Defaults to `CameraUINotification`.    |
-| `grafana_ttl`           | no       | alerts                  | Seconds before Grafana auto-resolves the alert. Default `300`, minimum `30`. |
-| `grafana_irm_url`       | yes      | irm                     | Inbound webhook URL of an IRM / OnCall integration. The token is in the URL, so it is masked and kept out of every error message. |
+| Field                   | Required | Mode          | Notes                                                    |
+| ----------------------- | -------- | ------------- | --------------------------------------------------------- |
+| `grafana_mode`          | yes      | —             | `annotations`, `alertmanager`, or `irm`. Defaults to `annotations`. |
+| `grafana_server`        | yes      | annotations   | Base URL of the Grafana instance. Trailing `/` trimmed.   |
+| `grafana_token`         | yes      | annotations   | Service-account token, sent as `Authorization: Bearer <token>`. |
+| `grafana_tags`          | no       | annotations   | Comma-separated extra tags.                               |
+| `grafana_am_url`        | yes      | alertmanager  | Base URL of the **Alertmanager**, not of Grafana. Trailing `/` trimmed. |
+| `grafana_am_user`       | no       | alertmanager  | Basic-auth username. For Grafana Cloud, the Alertmanager instance ID. |
+| `grafana_am_password`   | no       | alertmanager  | Basic-auth password. For Grafana Cloud, an API token. Required if a username is set, and vice versa. |
+| `grafana_alertname`     | no       | alertmanager  | `alertname` label. Defaults to `CameraUINotification`.    |
+| `grafana_ttl`           | no       | alertmanager  | Seconds before Alertmanager auto-resolves the alert. Default `300`, minimum `30`. |
+| `grafana_irm_url`       | yes      | irm           | Inbound webhook URL of an IRM / OnCall integration. The token is in the URL, so it is masked and kept out of every error message. |
+| `grafana_irm_ttl`       | no       | irm           | Seconds before the alert is eligible to auto-resolve. Default `300`, minimum `30`. Whether IRM acts on it depends on the integration's templates. |
 
 **Annotations** — `POST {server}/api/annotations` with a point-in-time, organization-wide
-annotation tagged `camera.ui`, `camera:<id>`, `severity:<level>`, plus your extra tags. Surface it
+annotation tagged `camera.ui`, `camera:<name>`, `severity:<level>`, plus your extra tags. Surface it
 on a dashboard with an annotation query filtered on the `camera.ui` tag; that survives dashboard
 renames, which pinning to a dashboard UID would not. The tooltip text carries the title, the body,
 and — when `base_url` is set — a link back to camera.ui.
 
-**Alerts** — `POST {server}/api/alertmanager/grafana/api/v2/alerts`, so your existing notification
-policies route the event. `endsAt` is `startsAt + grafana_ttl`, which lets Grafana auto-resolve the
-alert without a second request. Labels are `alertname`, `source=camera.ui`, `severity` (camera.ui's
-own four levels, verbatim), `camera`, and a unique `event_id` — the last of these matters, because
+**Alertmanager** — `POST {alertmanager}/api/v2/alerts`, straight to an Alertmanager's own API, with
+optional basic auth. Works with a standalone Prometheus Alertmanager, Mimir/Cortex, or Grafana
+Cloud's hosted Alertmanager (username = instance ID, password = API token).
+
+> **This mode does not talk to Grafana**, and it deliberately cannot. Grafana's built-in
+> Alertmanager will not accept posted alerts: its route table exposes `GET` for alerts but declares
+> the `POST` route only as `/alertmanager/{DatasourceUID}/api/v2/alerts`, a proxy to an *external*
+> Alertmanager, with no `grafana` variant. Grafana-managed alerts can only come from Grafana's own
+> rule evaluation. Point this at a real Alertmanager. (Versions 0.6.0–0.6.1 targeted Grafana here
+> and always failed with `400 bad request data`.)
+
+`endsAt` is `startsAt + grafana_ttl`, which lets Alertmanager auto-resolve the alert without a
+second request. Labels are `alertname`, `source=camera.ui`, `severity` (camera.ui's own four
+levels, verbatim), `camera`, `camera_id`, and a unique `event_id` — the last of these matters, because
 Alertmanager deduplicates on the label set and without it two detections on one camera inside the
 TTL window would collapse into a single alert. The absolute deep link becomes `generatorURL`,
-which Grafana shows as **Source**.
+which Alertmanager shows as **Source**.
 
 **IRM** — `POST {integration URL}`. IRM renders each alert group through templates chosen by the
 integration's *type*, and the two types people actually create read different bodies, so the
@@ -140,11 +155,19 @@ labels/annotations/`generatorURL`/`imageURL`, `groupKey`, `commonLabels`, `exter
 `link_to_upstream_details`) for a **Webhook** integration. `title`, `message`, and
 `state=alerting` are read by both. One body, correct under either type, nothing to configure.
 
-Alert groups are keyed **per camera** — `camera.ui:<cameraId>`, falling back to `camera.ui` for a
+Alert groups are keyed **per camera** — `camera.ui:<camera>`, falling back to `camera.ui` for a
 notification that names no camera — so one busy camera can't bury a quiet one. Within a group each
-event keeps its own `fingerprint`, so detections stay individually visible. Unlike Alerts mode,
-IRM groups do **not** auto-resolve: there is no TTL and no follow-up `state: "ok"` request, so they
-stay open until you resolve them.
+event keeps its own `fingerprint`, so detections stay individually visible. Each alert carries a
+future `endsAt` (`startsAt + grafana_irm_ttl`), the same way Alertmanager mode expresses
+"resolves on its own at this time"; whether IRM acts on it depends on the integration's templates,
+and if it does not, groups stay open until you resolve them by hand. There is still no follow-up
+`state: "ok"` request — every mode is one stateless POST per event.
+
+> **Camera names:** `camera` carries the camera's display name, taken from `Data["cameraName"]`
+> when a publisher supplies one and otherwise from the deep link, which camera.ui routes by name.
+> `Data["cameraId"]` is a UUID for the publishers seen so far, so it is kept separately as
+> `camera_id` (alertmanager and IRM modes) for routing rules that must survive a rename. With
+> neither a name nor a deep link, `camera` falls back to the id.
 
 > **Images:** ntfy, Pushover, Telegram, and Discord all render the detection snapshot. Gotify is
 > text + link only (it needs a hosted image URL, which this fully-local plugin doesn't provide).
