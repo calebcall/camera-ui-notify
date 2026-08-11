@@ -139,7 +139,15 @@ func (n *ntfy) Send(ctx context.Context, cfg map[string]string, notif sdk.Notifi
 	}
 
 	req.Header.Set("Title", notif.Title)
-	req.Header.Set("Priority", strconv.Itoa(PriorityScale(notif.Severity, 1, 5)))
+	// ntfy has no way to replace an already-published message, so a silent
+	// update-only publish (the AI description superseding its detection
+	// alert) is delivered at min priority instead: it still lands in the
+	// topic, but ntfy clients deliver priority 1 without sound or vibration.
+	priority := PriorityScale(notif.Severity, 1, 5)
+	if SilentDelivery(notif) {
+		priority = 1
+	}
+	req.Header.Set("Priority", strconv.Itoa(priority))
 	if notif.DeepLink != "" {
 		req.Header.Set("Click", notif.DeepLink)
 	}

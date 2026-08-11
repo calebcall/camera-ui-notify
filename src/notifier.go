@@ -141,8 +141,17 @@ func (p *NotifyPlugin) UpdateDevice(deviceID string, patch map[string]any) (*sdk
 func (p *NotifyPlugin) SendNotification(deviceIDs []string, n *sdk.Notification) error {
 	var errs []error
 
-	p.logf("notify: sendNotification for %d device(s): title=%q severity=%q hasThumbnail=%t imageUrl=%t deepLink=%t",
-		len(deviceIDs), n.Title, n.Severity, len(n.Thumbnail) > 0, n.ImageURL != "", n.DeepLink != "")
+	p.logf("notify: sendNotification for %d device(s): title=%q severity=%q hasThumbnail=%t imageUrl=%t deepLink=%t tag=%q silent=%t",
+		len(deviceIDs), n.Title, n.Severity, len(n.Thumbnail) > 0, n.ImageURL != "", n.DeepLink != "", n.Tag, n.Silent)
+
+	// camera.ui republishes a notification under the same Tag when it has
+	// more to say about an event it already announced — in practice, the AI
+	// description landing a few seconds after the detection alert. That
+	// republish carries Silent. Backends that can edit the original message
+	// (Telegram, Discord) always get it, because replacing costs the user
+	// nothing; the rest deliver it quietly, or drop it when the user asked
+	// for exactly one notification per event.
+	skipSilent := backend.SilentDelivery(*n) && p.silentUpdatePolicy() == silentUpdatesSkip
 
 	// base_url is plugin-level config (not per-backend), so it's read once
 	// here rather than threaded into each backend's cfg map. When set, and
@@ -177,6 +186,14 @@ func (p *NotifyPlugin) SendNotification(deviceIDs []string, n *sdk.Notification)
 		b, ok := backend.Get(service)
 		if !ok {
 			p.warnf("notify: device %s references unknown service %q, skipping", id, service)
+			continue
+		}
+
+		// With no tag there is nothing to replace, so even a replacing
+		// backend would have to post a second message.
+		replaceable := n.Tag != "" && backend.ReplacesTaggedMessages(b)
+		if skipSilent && !replaceable {
+			p.logf("notify: device %s (%s) cannot replace by tag, skipping silent update %q", id, service, n.Title)
 			continue
 		}
 
@@ -283,6 +300,18 @@ func (p *NotifyPlugin) errorf(format string, args ...any) {
 	if p.Logger != nil {
 		p.Logger.Error(fmt.Sprintf(format, args...))
 	}
+}
+
+// silentUpdatePolicy reads the persisted "silent_updates" selection,
+// defaulting to silentUpdatesDeliver for an unset or unrecognized value —
+// dropping notifications is the destructive choice, so it is never the
+// fallback.
+func (p *NotifyPlugin) silentUpdatePolicy() string {
+	policy, _ := p.Storage.GetValue("silent_updates", silentUpdatesDeliver).(string)
+	if policy == silentUpdatesSkip {
+		return silentUpdatesSkip
+	}
+	return silentUpdatesDeliver
 }
 
 // NotificationSettings implements sdk.NotifierInterface. The service

@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +32,10 @@ type telegram struct {
 	// baseURL is the Bot API base, e.g. "https://api.telegram.org". Defaulted
 	// by newTelegram; overridable in tests to point at an httptest server.
 	baseURL string
+	// collapse remembers the message_id delivered under each notification Tag
+	// so a later same-tag publish edits that message instead of posting a
+	// second one. Nil disables collapsing (see collapseStore).
+	collapse *collapseStore
 }
 
 // newTelegram constructs a Telegram backend with a client suitable for
@@ -38,8 +43,9 @@ type telegram struct {
 // the client and baseURL fields to point at an httptest server.
 func newTelegram() *telegram {
 	return &telegram{
-		client:  &http.Client{Timeout: 10 * time.Second},
-		baseURL: defaultTelegramBaseURL,
+		client:   &http.Client{Timeout: 10 * time.Second},
+		baseURL:  defaultTelegramBaseURL,
+		collapse: newCollapseStore(),
 	}
 }
 
@@ -49,6 +55,11 @@ func init() {
 
 func (tg *telegram) ID() string    { return "telegram" }
 func (tg *telegram) Label() string { return "Telegram" }
+
+// ReplacesTaggedMessages implements TagReplacer: Send edits the message it
+// previously delivered under the same tag via editMessageText /
+// editMessageCaption.
+func (tg *telegram) ReplacesTaggedMessages() bool { return true }
 
 func (tg *telegram) Schema() []sdk.JsonSchema {
 	cond := []sdk.SchemaCondition{{Key: "service", Value: "telegram"}}
@@ -110,9 +121,31 @@ type telegramReplyMarkup struct {
 
 // telegramSendMessagePayload is the JSON body posted to sendMessage.
 type telegramSendMessagePayload struct {
+	ChatID              string               `json:"chat_id"`
+	Text                string               `json:"text"`
+	ReplyMarkup         *telegramReplyMarkup `json:"reply_markup,omitempty"`
+	DisableNotification bool                 `json:"disable_notification,omitempty"`
+}
+
+// telegramEditPayload is the JSON body posted to editMessageText (Text set)
+// or editMessageCaption (Caption set) to replace an already-delivered
+// message. Telegram edits never re-alert the chat, so there is no
+// disable_notification to send here.
+type telegramEditPayload struct {
 	ChatID      string               `json:"chat_id"`
-	Text        string               `json:"text"`
+	MessageID   string               `json:"message_id"`
+	Text        string               `json:"text,omitempty"`
+	Caption     string               `json:"caption,omitempty"`
 	ReplyMarkup *telegramReplyMarkup `json:"reply_markup,omitempty"`
+}
+
+// telegramSendResponse is the slice of a Bot API send response this backend
+// reads: the message_id needed to edit the message later.
+type telegramSendResponse struct {
+	OK     bool `json:"ok"`
+	Result struct {
+		MessageID int64 `json:"message_id"`
+	} `json:"result"`
 }
 
 // telegramText builds the combined text used for both sendMessage's "text"
@@ -143,6 +176,13 @@ func telegramReplyMarkupFor(notif sdk.Notification) *telegramReplyMarkup {
 // Send delivers a single notification via the Telegram Bot API. Telegram
 // has no severity/priority concept, so notif.Severity is not mapped to
 // anything.
+//
+// When notif carries a Tag that this backend has already delivered to the
+// same chat, the earlier message is edited in place rather than a second one
+// posted — that is how the AI description arriving after a detection alert
+// updates the alert instead of duplicating it. An edit that Telegram rejects
+// (message deleted, too old, "message is not modified", ...) falls back to a
+// fresh send, so a failed replacement still delivers the content.
 func (tg *telegram) Send(ctx context.Context, cfg map[string]string, notif sdk.Notification) error {
 	baseURL := tg.baseURL
 	if baseURL == "" {
@@ -156,9 +196,30 @@ func (tg *telegram) Send(ctx context.Context, cfg map[string]string, notif sdk.N
 		ctx = context.Background()
 	}
 
+	key := ""
+	if notif.Tag != "" {
+		key = collapseKey("telegram", token, chat, notif.Tag)
+	}
+
+	// Only a Silent publish replaces: that flag is camera.ui saying "this
+	// supersedes the one I already sent". A loud publish reusing the tag is a
+	// genuinely new event (tags like "motion:cam-1" repeat), and rewriting the
+	// previous alert would erase it from the chat's history.
+	if SilentDelivery(notif) {
+		if prev, ok := tg.collapse.lookup(key); ok {
+			if err := tg.edit(ctx, baseURL, token, chat, notif, prev); err == nil {
+				return nil
+			}
+			// The stored message is unusable; drop it so we don't retry the
+			// same dead id on the next publish, and post a new message below.
+			tg.collapse.forget(key)
+		}
+	}
+
 	var req *http.Request
 	var err error
-	if len(notif.Thumbnail) > 0 {
+	photo := len(notif.Thumbnail) > 0
+	if photo {
 		req, err = tg.newSendPhotoRequest(ctx, baseURL, token, chat, notif)
 	} else {
 		req, err = tg.newSendMessageRequest(ctx, baseURL, token, chat, notif)
@@ -167,6 +228,58 @@ func (tg *telegram) Send(ctx context.Context, cfg map[string]string, notif sdk.N
 		return fmt.Errorf("telegram: build request: %w", RedactRequestError(err))
 	}
 
+	body, err := tg.do(req)
+	if err != nil {
+		return err
+	}
+
+	if key != "" {
+		var parsed telegramSendResponse
+		if json.Unmarshal(body, &parsed) == nil && parsed.Result.MessageID != 0 {
+			tg.collapse.remember(key, strconv.FormatInt(parsed.Result.MessageID, 10), photo)
+		}
+	}
+
+	return nil
+}
+
+// edit replaces an already-delivered message with notif's current content.
+// A message posted as a photo can only have its caption edited (Telegram
+// rejects editMessageText for it) and vice versa, which is why the delivered
+// kind is recorded alongside the id.
+func (tg *telegram) edit(ctx context.Context, baseURL, token, chat string, notif sdk.Notification, prev collapseEntry) error {
+	payload := telegramEditPayload{
+		ChatID:      chat,
+		MessageID:   prev.messageID,
+		ReplyMarkup: telegramReplyMarkupFor(notif),
+	}
+	method := "editMessageText"
+	if prev.photo {
+		method = "editMessageCaption"
+		payload.Caption = telegramText(notif)
+	} else {
+		payload.Text = telegramText(notif)
+	}
+
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("telegram: encode edit payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/bot"+token+"/"+method, bytes.NewReader(buf))
+	if err != nil {
+		return fmt.Errorf("telegram: build edit request: %w", RedactRequestError(err))
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	_, err = tg.do(req)
+	return err
+}
+
+// do performs req and returns the response body on a 2xx, or a non-nil error
+// carrying the server's complaint. The body is read (bounded) because the
+// caller needs the message_id out of it.
+func (tg *telegram) do(req *http.Request) ([]byte, error) {
 	client := tg.client
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
@@ -174,26 +287,32 @@ func (tg *telegram) Send(ctx context.Context, cfg map[string]string, notif sdk.N
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("telegram: request failed: %w", RedactRequestError(err))
+		return nil, fmt.Errorf("telegram: request failed: %w", RedactRequestError(err))
 	}
 	defer resp.Body.Close()
 
+	const maxBody = 4096
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		const maxBody = 512
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
-		return fmt.Errorf("telegram: server responded %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		const maxErrBody = 512
+		if len(body) > maxErrBody {
+			body = body[:maxErrBody]
+		}
+		return nil, fmt.Errorf("telegram: server responded %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	return nil
+	return body, nil
 }
 
 // newSendMessageRequest builds the JSON sendMessage request used when there
 // is no image to deliver.
 func (tg *telegram) newSendMessageRequest(ctx context.Context, baseURL, token, chat string, notif sdk.Notification) (*http.Request, error) {
 	payload := telegramSendMessagePayload{
-		ChatID:      chat,
-		Text:        telegramText(notif),
-		ReplyMarkup: telegramReplyMarkupFor(notif),
+		ChatID:              chat,
+		Text:                telegramText(notif),
+		ReplyMarkup:         telegramReplyMarkupFor(notif),
+		DisableNotification: SilentDelivery(notif),
 	}
 
 	buf, err := json.Marshal(payload)
@@ -226,6 +345,11 @@ func (tg *telegram) newSendPhotoRequest(ctx context.Context, baseURL, token, cha
 	}
 	if err := mw.WriteField("caption", telegramText(notif)); err != nil {
 		return nil, err
+	}
+	if SilentDelivery(notif) {
+		if err := mw.WriteField("disable_notification", "true"); err != nil {
+			return nil, err
+		}
 	}
 	if markup := telegramReplyMarkupFor(notif); markup != nil {
 		markupJSON, err := json.Marshal(markup)

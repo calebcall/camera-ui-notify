@@ -623,3 +623,215 @@ func TestStorageSchema_DoesNotMutateBackendSchema(t *testing.T) {
 		}
 	}
 }
+
+// replacingFakeBackend is a fakeBackend that advertises TagReplacer, standing
+// in for Telegram/Discord so notifier.go's silent-update policy can be tested
+// against both kinds of backend without any network.
+type replacingFakeBackend struct {
+	fakeBackend
+}
+
+func (f *replacingFakeBackend) ID() string    { return "fake-replacer" }
+func (f *replacingFakeBackend) Label() string { return "Fake (replacing)" }
+
+func (f *replacingFakeBackend) Schema() []sdk.JsonSchema {
+	return []sdk.JsonSchema{
+		{
+			Type:      sdk.JsonSchemaTypeString,
+			Key:       "topic",
+			Title:     "Topic",
+			Required:  true,
+			Condition: []sdk.SchemaCondition{{Key: "service", Value: "fake-replacer"}},
+		},
+	}
+}
+
+func (f *replacingFakeBackend) ReplacesTaggedMessages() bool { return true }
+
+var (
+	sharedReplacingBackend     *replacingFakeBackend
+	registerReplacingBackendMu sync.Once
+)
+
+// registerReplacingFakeBackend mirrors registerFakeBackend for the
+// tag-replacing variant: register once per test binary, reset per test.
+func registerReplacingFakeBackend() *replacingFakeBackend {
+	registerReplacingBackendMu.Do(func() {
+		sharedReplacingBackend = &replacingFakeBackend{}
+		backend.Register(sharedReplacingBackend)
+	})
+	sharedReplacingBackend.reset()
+	return sharedReplacingBackend
+}
+
+// silentUpdate is the republish camera.ui sends once the AI description is
+// ready: the tag of the alert it supersedes, plus Silent.
+func silentUpdate() *sdk.Notification {
+	return &sdk.Notification{
+		Title:  "Motion detected",
+		Body:   "A person is walking up the driveway.",
+		Tag:    "motion:cam-1",
+		Silent: true,
+	}
+}
+
+func TestSendNotification_DeliversSilentUpdateByDefault(t *testing.T) {
+	fb := registerFakeBackend()
+	p := newTestPlugin(map[string]any{
+		"service": "fake",
+		"topic":   "sometopic",
+	})
+
+	if err := p.SendNotification([]string{"cfg:fake"}, silentUpdate()); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+	// Unset config must not drop notifications: the AI description is usually
+	// the more informative half of the pair.
+	if got := fb.callCount(); got != 1 {
+		t.Fatalf("Send call count = %d, want 1 (deliver is the default policy)", got)
+	}
+}
+
+func TestSendNotification_SkipPolicyDropsSilentUpdate(t *testing.T) {
+	fb := registerFakeBackend()
+	p := newTestPlugin(map[string]any{
+		"service":        "fake",
+		"topic":          "sometopic",
+		"silent_updates": "skip",
+	})
+
+	if err := p.SendNotification([]string{"cfg:fake"}, silentUpdate()); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+	if got := fb.callCount(); got != 0 {
+		t.Fatalf("Send call count = %d, want 0 (skip policy, backend cannot replace)", got)
+	}
+}
+
+func TestSendNotification_SkipPolicyStillDeliversTheInitialAlert(t *testing.T) {
+	fb := registerFakeBackend()
+	p := newTestPlugin(map[string]any{
+		"service":        "fake",
+		"topic":          "sometopic",
+		"silent_updates": "skip",
+	})
+
+	// Only the follow-up carries Silent; the alert itself always goes out.
+	n := &sdk.Notification{Title: "Motion detected", Tag: "motion:cam-1"}
+	if err := p.SendNotification([]string{"cfg:fake"}, n); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+	if got := fb.callCount(); got != 1 {
+		t.Fatalf("Send call count = %d, want 1", got)
+	}
+}
+
+func TestSendNotification_SkipPolicyKeepsCriticalUpdate(t *testing.T) {
+	fb := registerFakeBackend()
+	p := newTestPlugin(map[string]any{
+		"service":        "fake",
+		"topic":          "sometopic",
+		"silent_updates": "skip",
+	})
+
+	// Silent is ignored for a critical alert, so the skip policy cannot
+	// swallow one.
+	n := silentUpdate()
+	n.Severity = sdk.SeverityCritical
+	if err := p.SendNotification([]string{"cfg:fake"}, n); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+	if got := fb.callCount(); got != 1 {
+		t.Fatalf("Send call count = %d, want 1 (critical ignores Silent)", got)
+	}
+}
+
+func TestSendNotification_SkipPolicyStillUpdatesReplacingBackend(t *testing.T) {
+	fb := registerReplacingFakeBackend()
+	p := newTestPlugin(map[string]any{
+		"service":        "fake-replacer",
+		"topic":          "sometopic",
+		"silent_updates": "skip",
+	})
+
+	// Skipping exists to avoid a second entry in the list. A backend that
+	// edits the original message adds no entry, so it gets the update either
+	// way — the user sees one notification whose text improves.
+	if err := p.SendNotification([]string{"cfg:fake-replacer"}, silentUpdate()); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+	if got := fb.callCount(); got != 1 {
+		t.Fatalf("Send call count = %d, want 1 (a replacing backend edits in place)", got)
+	}
+}
+
+func TestSendNotification_SkipPolicyDropsUntaggedSilentUpdate(t *testing.T) {
+	fb := registerReplacingFakeBackend()
+	p := newTestPlugin(map[string]any{
+		"service":        "fake-replacer",
+		"topic":          "sometopic",
+		"silent_updates": "skip",
+	})
+
+	// With no tag there is nothing to replace, so even a replacing backend
+	// would have to post a second message.
+	n := silentUpdate()
+	n.Tag = ""
+	if err := p.SendNotification([]string{"cfg:fake-replacer"}, n); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+	if got := fb.callCount(); got != 0 {
+		t.Fatalf("Send call count = %d, want 0 (no tag means no in-place replacement)", got)
+	}
+}
+
+func TestSilentUpdatePolicy_DefaultsToDeliver(t *testing.T) {
+	for _, stored := range []any{nil, "", "deliver", "nonsense", 42} {
+		values := map[string]any{}
+		if stored != nil {
+			values["silent_updates"] = stored
+		}
+		p := newTestPlugin(values)
+
+		if got := p.silentUpdatePolicy(); got != silentUpdatesDeliver {
+			t.Errorf("silentUpdatePolicy() with stored %#v = %q, want %q", stored, got, silentUpdatesDeliver)
+		}
+	}
+
+	p := newTestPlugin(map[string]any{"silent_updates": silentUpdatesSkip})
+	if got := p.silentUpdatePolicy(); got != silentUpdatesSkip {
+		t.Errorf("silentUpdatePolicy() = %q, want %q", got, silentUpdatesSkip)
+	}
+}
+
+func TestStorageSchema_HasSilentUpdatesField(t *testing.T) {
+	p := newTestPlugin(nil)
+
+	var field *sdk.JsonSchema
+	for i, f := range p.StorageSchema() {
+		if f.Key == "silent_updates" {
+			field = &p.StorageSchema()[i]
+			break
+		}
+	}
+	if field == nil {
+		t.Fatalf("expected a %q field in StorageSchema", "silent_updates")
+	}
+	if field.DefaultValue != silentUpdatesDeliver {
+		t.Errorf("DefaultValue = %v, want %q", field.DefaultValue, silentUpdatesDeliver)
+	}
+	if len(field.Enum) != 2 {
+		t.Errorf("Enum = %v, want the two policy values", field.Enum)
+	}
+	for _, v := range field.Enum {
+		if field.EnumLabels[v] == "" {
+			t.Errorf("Enum value %q has no EnumLabels entry, so the UI would show the raw value", v)
+		}
+	}
+	if field.Store == nil || !*field.Store {
+		t.Errorf("Store = %v, want true", field.Store)
+	}
+	if len(field.Condition) != 0 {
+		t.Errorf("Condition = %+v, want empty (applies to every service)", field.Condition)
+	}
+}
