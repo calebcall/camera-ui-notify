@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -41,9 +42,15 @@ type grafanaMode interface {
 	// parse validates the raw config input for this mode and returns the
 	// normalized cfg. It may read the instance keys via grafanaServerAndToken.
 	parse(input map[string]any) (map[string]string, error)
-	// send delivers one notification. client and ctx are supplied by
-	// grafana.Send so the mode holds no state of its own.
-	send(ctx context.Context, client *http.Client, cfg map[string]string, notif sdk.Notification) error
+	// send delivers one notification and returns the opaque id identifying
+	// what it created, for a later update to supersede. client and ctx are
+	// supplied by grafana.Send so the mode holds no state of its own.
+	send(ctx context.Context, client *http.Client, cfg map[string]string, notif sdk.Notification) (string, error)
+	// update supersedes the record identified by prevID — an id this same
+	// mode previously returned from send — with notif's current content, so
+	// the AI description revises the event already showing in Grafana instead
+	// of opening a second one.
+	update(ctx context.Context, client *http.Client, cfg map[string]string, notif sdk.Notification, prevID string) error
 }
 
 // grafana implements Backend for Grafana. Which surface a notification is
@@ -54,6 +61,11 @@ type grafana struct {
 	client *http.Client
 	// modes is the mode registry, populated by newGrafana.
 	modes []grafanaMode
+	// collapse remembers what each notification Tag created (an annotation
+	// id, or the event id an alert was filed under) so a later same-tag
+	// publish updates that record instead of opening a second one. Nil
+	// disables collapsing (see collapseStore).
+	collapse *collapseStore
 }
 
 // newGrafana constructs a Grafana backend with a client suitable for
@@ -67,6 +79,7 @@ func newGrafana() *grafana {
 			newGrafanaAlertmanager(),
 			newGrafanaIRM(),
 		},
+		collapse: newCollapseStore(),
 	}
 }
 
@@ -76,6 +89,12 @@ func init() {
 
 func (g *grafana) ID() string    { return "grafana" }
 func (g *grafana) Label() string { return "Grafana" }
+
+// ReplacesTaggedMessages implements TagReplacer. Every mode can revise what
+// it already filed for a tag: annotations PATCHes the annotation, and the
+// alert surfaces re-send under the event id the first alert used, which is
+// the identity both of them deduplicate on.
+func (g *grafana) ReplacesTaggedMessages() bool { return true }
 
 // mode looks up a registered mode by its id.
 func (g *grafana) mode(id string) (grafanaMode, bool) {
@@ -188,7 +207,71 @@ func (g *grafana) Send(ctx context.Context, cfg map[string]string, notif sdk.Not
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return m.send(ctx, client, cfg, notif)
+
+	// The key spans the mode and the whole resolved cfg, so an annotation id
+	// can never be read back as an event id, and repointing the backend at a
+	// different Grafana or Alertmanager invalidates the old records rather
+	// than trying to update something that lives on the previous target.
+	key := ""
+	if notif.Tag != "" {
+		key = collapseKey("grafana", cfg["mode"], grafanaCollapseTarget(cfg), notif.Tag)
+	}
+
+	// Only a Silent publish updates: that flag is camera.ui saying "this
+	// supersedes the one I already sent". A loud publish reusing the tag is a
+	// genuinely new event (tags like "motion:cam-1" repeat), and folding it
+	// into the previous alert would hide a detection.
+	if SilentDelivery(notif) {
+		if prev, ok := g.collapse.lookup(key); ok {
+			if err := m.update(ctx, client, cfg, notif, prev.messageID); err == nil {
+				return nil
+			}
+			// The stored record is unusable (annotation deleted, alert aged
+			// out); drop it so the next publish starts clean, and file a new
+			// one below rather than losing the description.
+			g.collapse.forget(key)
+		}
+	}
+
+	recordID, err := m.send(ctx, client, cfg, notif)
+	if err != nil {
+		return err
+	}
+	g.collapse.remember(key, recordID, false)
+	return nil
+}
+
+// grafanaCollapseTarget renders the resolved config as a stable string
+// identifying where this delivery goes, for the collapse key. Every value is
+// included — some carry credentials, which is why collapseKey hashes what it
+// is given — so any config change starts a fresh set of records.
+func grafanaCollapseTarget(cfg map[string]string) string {
+	keys := make([]string, 0, len(cfg))
+	for k := range cfg {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys)*2)
+	for _, k := range keys {
+		parts = append(parts, k, cfg[k])
+	}
+	return strings.Join(parts, "\x00")
+}
+
+// grafanaWithEventID returns a copy of notif carrying id as its eventId, so
+// every grafanaEventID call in this delivery agrees on one identity — both
+// across the two fields IRM sends it in, and across an alert and the silent
+// follow-up that revises it. The caller's notification is never mutated: the
+// Data map is copied, not written through.
+func grafanaWithEventID(notif sdk.Notification, id string) sdk.Notification {
+	data := make(map[string]string, len(notif.Data)+1)
+	for k, v := range notif.Data {
+		data[k] = v
+	}
+	data["eventId"] = id
+	notif.Data = data
+	return notif
 }
 
 // grafanaServerAndToken reads and validates the Grafana-instance config
@@ -224,14 +307,23 @@ func grafanaServerAndToken(input map[string]any) (string, string, error) {
 // matters most for IRM, whose integration URL is itself the credential.
 // errPrefix is the "grafana: <mode>" string prepended to every error.
 func grafanaPostJSON(ctx context.Context, client *http.Client, url string, headers map[string]string, payload any, errPrefix string) error {
+	_, err := grafanaRequestJSON(ctx, client, http.MethodPost, url, headers, payload, errPrefix)
+	return err
+}
+
+// grafanaRequestJSON is grafanaPostJSON generalized over the HTTP method and
+// returning the response body, for the callers that need it: annotations
+// reads the id of the annotation it just created, and updates go out as
+// PATCH. The body is read with the same cap the error path uses.
+func grafanaRequestJSON(ctx context.Context, client *http.Client, method, url string, headers map[string]string, payload any, errPrefix string) ([]byte, error) {
 	buf, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("%s: encode payload: %w", errPrefix, err)
+		return nil, fmt.Errorf("%s: encode payload: %w", errPrefix, err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(buf))
 	if err != nil {
-		return fmt.Errorf("%s: build request: %w", errPrefix, RedactRequestError(err))
+		return nil, fmt.Errorf("%s: build request: %w", errPrefix, RedactRequestError(err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range headers {
@@ -240,21 +332,22 @@ func grafanaPostJSON(ctx context.Context, client *http.Client, url string, heade
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s: request failed: %w", errPrefix, RedactRequestError(err))
+		return nil, fmt.Errorf("%s: request failed: %w", errPrefix, RedactRequestError(err))
 	}
 	defer resp.Body.Close()
 
+	const maxBody = 512
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		const maxBody = 512
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
-		return &grafanaStatusError{
+		return nil, &grafanaStatusError{
 			prefix: errPrefix,
 			status: resp.StatusCode,
-			body:   strings.TrimSpace(string(b)),
+			body:   strings.TrimSpace(string(body)),
 		}
 	}
 
-	return nil
+	return body, nil
 }
 
 // grafanaStatusError is the error grafanaPostJSON returns for a non-2xx

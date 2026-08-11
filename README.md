@@ -69,7 +69,7 @@ Delivers to any HTTP endpoint you provide — the fallback for anything without 
 | `headerName`  | no       | —       | Optional custom header name (e.g. for a shared secret). Requires `headerValue` if set. |
 | `headerValue` | no       | —       | Value of the custom header. Requires `headerName` if set.       |
 
-Delivery: `{method} {url}` with `Content-Type: application/json` and (if configured) the custom header, carrying a JSON body of `{title, subtitle, body, severity, tag, imageUrl, deepLink, data, createdAt, thumbnailBase64}`.
+Delivery: `{method} {url}` with `Content-Type: application/json` and (if configured) the custom header, carrying a JSON body of `{title, subtitle, body, severity, tag, silent, imageUrl, deepLink, data, createdAt, thumbnailBase64}`.
 
 ### Pushover
 
@@ -207,6 +207,32 @@ timer and per-event state, and a restart would strand the group open anyway. Clo
 > **Secrets in logs:** transport failures never log the bot token / webhook URL / other
 > URL-embedded secret — request URLs are redacted from delivery errors.
 
+## Follow-up updates (AI descriptions)
+
+camera.ui announces a detection immediately, then republishes the same notification a few seconds later once the AI description is ready. Both publishes carry the same `tag` (the collapse key), and the second carries `silent: true`, meaning *this only updates the first one — don't alert again*.
+
+Handled per backend, according to what each platform can actually do:
+
+| Backend         | Follow-up behaviour                                                                  |
+| --------------- | ------------------------------------------------------------------------------------ |
+| Telegram        | **Replaces** the original message (`editMessageText` / `editMessageCaption`).         |
+| Discord         | **Replaces** the original message (`PATCH .../messages/{id}`).                        |
+| Grafana         | **Revises** the record it already filed — see below.                                  |
+| ntfy            | Delivered at priority `1` — visible, no sound or vibration.                           |
+| Gotify          | Delivered at priority `3` — joins the in-app list, raises no system notification.      |
+| Pushover        | Delivered at priority `-1` (quiet) — no sound or vibration.                            |
+| Generic webhook | `silent: true` is forwarded in the JSON payload; your endpoint decides.               |
+
+Grafana revises per mode: **annotations** patches the annotation it created (`PATCH /api/annotations/:id`), so the dashboard keeps one marker at the detection's own timestamp whose text improves. **Alertmanager** and **IRM** re-file under the `event_id` / `alert_uid` the first alert used — that identity is what each surface deduplicates on, so the existing alert or group picks up the description instead of a second one firing. When the publisher supplies its own `Data["eventId"]`, that id is authoritative and the two publishes already share it, so those modes update correctly even across a plugin restart.
+
+The replacing backends therefore show **one** notification whose text improves in place. The message id is remembered in memory per tag for 15 minutes; after a plugin restart, or if the original message was deleted, the update is delivered as a new (quiet) message instead of being lost.
+
+Only the `silent` follow-up replaces. Detection tags repeat across events (`motion:cam-1` is the same tag every time that camera sees something), so a *new* alert reusing a tag always posts a new message — your chat history is never rewritten by a later event.
+
+**Critical alerts ignore `silent`** — a `critical` severity notification always alerts, per the SDK contract.
+
+If you would rather never see the follow-up on a backend that can't replace, set **Follow-up updates** to `Skip the update entirely` in the plugin settings. Backends that replace in place still receive it under that setting, since editing adds nothing to the notification list — with the one caveat that a lost message id (restart, deleted message) turns that edit into a new quiet message.
+
 ## Configuring your target (v1: one active target)
 
 There is no "add device" flow. Instead, configure the plugin itself:
@@ -214,7 +240,8 @@ There is no "add device" flow. Instead, configure the plugin itself:
 1. Open the **Notify** plugin's page in camera.ui (Plugins → Notify).
 2. In its settings, pick a **Service** (`ntfy`, `Gotify`, `Generic webhook`, `Pushover`, `Telegram`, `Discord`, or `Grafana`) from the dropdown built from the registered backends.
 3. Fill in that service's fields — only the selected service's fields are shown; the rest are condition-gated out.
-4. Save. The config is validated (`ParseTarget`) the next time a notification is dispatched; `getDevices` then synthesizes one delivery target from it, and notifications from any publisher are delivered there.
+4. Optionally set **Follow-up updates** (see [Follow-up updates](#follow-up-updates-ai-descriptions)) — defaults to delivering the AI description quietly.
+5. Save. The config is validated (`ParseTarget`) the next time a notification is dispatched; `getDevices` then synthesizes one delivery target from it, and notifications from any publisher are delivered there.
 
 This is a **single, instance-wide target** in v1 — there's no way to register several devices at once. Changing the config replaces the previous target rather than adding to it. Delivery for that one target is a single request per notification (no fan-out to worry about, since there's only one device).
 
@@ -317,8 +344,23 @@ dispatch logic in `notifier.go` all pick up the new backend automatically.
 
 ```bash
 go test ./src/...                 # full suite
-go test ./src/... -race -count=1  # race detector
+go test ./src/... -race -count=1  # race detector (needs cgo: apt-get install gcc)
+npm run lint                      # golangci-lint, configured by .golangci.yml
+npm run format                    # gofmt + go fix
 ```
+
+Linting is golangci-lint only. It bundles staticcheck's analyzers (`SA`/`S`/`ST`/`QF`), so running
+the standalone `staticcheck` binary alongside it only duplicates findings — and, being a separate
+tool, it can't read the path-scoped exclusions in `.golangci.yml`.
+
+```bash
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+```
+
+`.golangci.yml` excludes three deliberate idioms, each scoped as narrowly as the linter allows so
+the check stays live everywhere else: `defer resp.Body.Close()` (errcheck), and — in `_test.go`
+only — passing a nil `Context` to exercise each backend's `ctx == nil` fallback (SA1012) and the
+`!(a <= b && b <= c)` monotonicity assertions (QF1001).
 
 ## License
 

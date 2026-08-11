@@ -130,11 +130,16 @@ func (w *webhook) ParseTarget(input map[string]any) (map[string]string, error) {
 
 // webhookPayload is the JSON body posted/put to the configured webhook URL.
 type webhookPayload struct {
-	Title           string            `json:"title"`
-	Subtitle        string            `json:"subtitle,omitempty"`
-	Body            string            `json:"body,omitempty"`
-	Severity        string            `json:"severity,omitempty"`
-	Tag             string            `json:"tag,omitempty"`
+	Title    string `json:"title"`
+	Subtitle string `json:"subtitle,omitempty"`
+	Body     string `json:"body,omitempty"`
+	Severity string `json:"severity,omitempty"`
+	Tag      string `json:"tag,omitempty"`
+	// Silent marks a publish that only updates an earlier notification
+	// carrying the same Tag (e.g. the AI description superseding its
+	// detection alert) and so should not alert again. Forwarded verbatim:
+	// the receiver knows what its own endpoint can do about it.
+	Silent          bool              `json:"silent,omitempty"`
 	ImageURL        string            `json:"imageUrl,omitempty"`
 	DeepLink        string            `json:"deepLink,omitempty"`
 	Data            map[string]string `json:"data,omitempty"`
@@ -161,6 +166,7 @@ func (w *webhook) Send(ctx context.Context, cfg map[string]string, notif sdk.Not
 		Body:      notif.Body,
 		Severity:  string(notif.Severity),
 		Tag:       notif.Tag,
+		Silent:    SilentDelivery(notif),
 		ImageURL:  notif.ImageURL,
 		DeepLink:  notif.DeepLink,
 		Data:      notif.Data,

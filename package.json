@@ -1,7 +1,7 @@
 {
   "displayName": "Notify",
   "name": "@calebcall/camera-ui-notify",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "A fully-local, multi-backend camera.ui notifier plugin: delivers notifications to ntfy, Gotify, Pushover, Telegram, Discord, Grafana, or a generic webhook, entirely on your own hardware with no cloud dependency.",
   "author": "calebcall (https://github.com/calebcall/camera-ui-notify)",
   "main": "./main.go",
@@ -12,7 +12,7 @@
     "bundle:dev": "npm run build && cross-env MODE=development cui bundle",
     "format": "gofmt -w ./src/* && go fix ./src/...",
     "install-updates": "npm i --save --force && go mod tidy",
-    "lint": "staticcheck ./src/... && golangci-lint run ./src/...",
+    "lint": "golangci-lint run ./src/...",
     "prepublishOnly": "node -e \"if(!process.env.SAFE_PUBLISH){console.error('Error: Please use @camera.ui/cli to publish the plugin:\\n  npm run publish:alpha\\n  npm run publish:beta\\n  npm run publish:latest\\n');process.exit(1)}\"",
     "publish:alpha": "npm i --save --force && npm run bundle && cui publish --alpha",
     "publish:beta": "npm i --save --force && npm run bundle && cui publish --beta",

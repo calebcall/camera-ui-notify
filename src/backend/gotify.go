@@ -127,14 +127,23 @@ func (g *gotify) Send(ctx context.Context, cfg map[string]string, notif sdk.Noti
 		body = notif.Title
 	}
 
+	// Gotify treats priority 0-3 as "silent" (no system notification, only
+	// an in-app list entry), so mapping Info->0 makes detections appear to
+	// deliver nothing. Map into 4..10 so every severity raises a real
+	// notification: Info=4, Warn=6, Error=8, Critical=10.
+	priority := PriorityScale(notif.Severity, 4, 10)
+	// Gotify has no way to replace an already-published message, so a silent
+	// update-only publish (the AI description superseding its detection
+	// alert) drops into that same 0-3 band — the message still joins the
+	// in-app list, but raises no second system notification.
+	if SilentDelivery(notif) {
+		priority = 3
+	}
+
 	payload := gotifyPayload{
-		Title:   notif.Title,
-		Message: body,
-		// Gotify treats priority 0-3 as "silent" (no system notification, only
-		// an in-app list entry), so mapping Info->0 makes detections appear to
-		// deliver nothing. Map into 4..10 so every severity raises a real
-		// notification: Info=4, Warn=6, Error=8, Critical=10.
-		Priority: PriorityScale(notif.Severity, 4, 10),
+		Title:    notif.Title,
+		Message:  body,
+		Priority: priority,
 	}
 
 	// Inline notif.Thumbnail bytes aren't supported here: Gotify's

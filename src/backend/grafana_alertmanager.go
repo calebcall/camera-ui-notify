@@ -219,12 +219,23 @@ type grafanaAlertPayload struct {
 	GeneratorURL string            `json:"generatorURL,omitempty"`
 }
 
-func (a *grafanaAlertmanager) send(ctx context.Context, client *http.Client, cfg map[string]string, notif sdk.Notification) error {
+// update re-files the alert under the event id the original was sent with.
+// Alertmanager identifies an alert by its full label set, so an identical
+// event_id updates that alert in place — its annotations pick up the AI
+// description — instead of a second alert firing for the same detection.
+func (a *grafanaAlertmanager) update(ctx context.Context, client *http.Client, cfg map[string]string, notif sdk.Notification, prevID string) error {
+	_, err := a.send(ctx, client, cfg, grafanaWithEventID(notif, prevID))
+	return err
+}
+
+func (a *grafanaAlertmanager) send(ctx context.Context, client *http.Client, cfg map[string]string, notif sdk.Notification) (string, error) {
+	eventID := grafanaEventID(notif)
+
 	labels := map[string]string{
 		"alertname": cfg["alertname"],
 		"source":    "camera.ui",
 		"severity":  grafanaSeverity(notif),
-		"event_id":  grafanaEventID(notif),
+		"event_id":  eventID,
 	}
 	if cam := grafanaCameraLabel(notif); cam != "" {
 		labels["camera"] = cam
@@ -282,7 +293,7 @@ func (a *grafanaAlertmanager) send(ctx context.Context, client *http.Client, cfg
 	// which Mimir and Grafana Cloud serve the Alertmanager API.
 	var statusErr *grafanaStatusError
 	if errors.As(err, &statusErr) && statusErr.status == http.StatusNotFound {
-		return fmt.Errorf("%w (if this is Mimir or Grafana Cloud, the URL likely needs an /alertmanager path prefix; a standalone Alertmanager serves the API at the root)", err)
+		return "", fmt.Errorf("%w (if this is Mimir or Grafana Cloud, the URL likely needs an /alertmanager path prefix; a standalone Alertmanager serves the API at the root)", err)
 	}
-	return err
+	return eventID, err
 }

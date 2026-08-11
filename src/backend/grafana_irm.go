@@ -135,7 +135,22 @@ type grafanaIRMAlert struct {
 	ImageURL     string            `json:"imageURL,omitempty"`
 }
 
-func (i *grafanaIRM) send(ctx context.Context, client *http.Client, cfg map[string]string, notif sdk.Notification) error {
+// update re-sends the alert group under the alert_uid the original used. IRM
+// keys a group on that id, so an identical one revises the existing group —
+// its title and message pick up the AI description — instead of opening a
+// second group for the same detection.
+func (i *grafanaIRM) update(ctx context.Context, client *http.Client, cfg map[string]string, notif sdk.Notification, prevID string) error {
+	_, err := i.send(ctx, client, cfg, grafanaWithEventID(notif, prevID))
+	return err
+}
+
+func (i *grafanaIRM) send(ctx context.Context, client *http.Client, cfg map[string]string, notif sdk.Notification) (string, error) {
+	// Resolved once and reused for both fields below: with no publisher
+	// eventId, grafanaEventID falls back to fresh random bytes on every call,
+	// which would otherwise give the fingerprint and the alert_uid two
+	// different values for a single alert.
+	eventID := grafanaEventID(notif)
+
 	message := notif.Body
 	if message == "" {
 		message = notif.Title
@@ -176,7 +191,7 @@ func (i *grafanaIRM) send(ctx context.Context, client *http.Client, cfg map[stri
 		// fingerprint identifies the alert instance. Using the per-event id
 		// keeps two detections on one camera distinct inside their shared
 		// group, the same role event_id plays in alerts mode.
-		Fingerprint: grafanaEventID(notif),
+		Fingerprint: eventID,
 		ImageURL:    notif.ImageURL,
 	}
 
@@ -196,12 +211,15 @@ func (i *grafanaIRM) send(ctx context.Context, client *http.Client, cfg map[stri
 		Message: message,
 		State:   "alerting",
 
-		AlertUID: grafanaEventID(notif),
+		AlertUID: eventID,
 		ImageURL: notif.ImageURL,
 		Link:     link,
 	}
 
-	return grafanaPostJSON(ctx, client, cfg["url"], nil, payload, "grafana: irm")
+	if err := grafanaPostJSON(ctx, client, cfg["url"], nil, payload, "grafana: irm"); err != nil {
+		return "", err
+	}
+	return eventID, nil
 }
 
 // grafanaIRMGroupKey decides which IRM alert group a notification joins.

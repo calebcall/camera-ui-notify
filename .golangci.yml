@@ -1,0 +1,41 @@
+# golangci-lint configuration.
+#
+# This is the single source of truth for Go linting in this repo. golangci-lint
+# v2 bundles staticcheck's analyzers (SA/S/ST/QF), so `npm run lint` no longer
+# shells out to the standalone `staticcheck` binary as well: it would re-report
+# the same findings, and — being a separate tool — it cannot read the
+# path-scoped exclusions below.
+#
+# Everything excluded here is a deliberate idiom in this codebase, scoped as
+# narrowly as the linter allows so the check stays live everywhere else.
+version: "2"
+
+linters:
+  default: standard
+
+  settings:
+    errcheck:
+      # Closing a response body after the response has been read cannot fail
+      # in a way the caller can act on, and every backend's Send discards it
+      # via `defer resp.Body.Close()`. errcheck flags it seven times across
+      # the package; checking it would add ceremony, not safety.
+      exclude-functions:
+        - (io.ReadCloser).Close
+
+  exclusions:
+    rules:
+      # Every backend's Send opens with `if ctx == nil { ctx = context.Background() }`
+      # and these tests pass a nil Context precisely to exercise that fallback.
+      # Scoped to _test.go so production code passing nil is still an error.
+      - path: _test\.go
+        linters:
+          - staticcheck
+        text: "SA1012:"
+
+      # The severity-ordering assertions read as "not monotonic":
+      #   if !(info <= warn && warn <= errS && errS <= crit)
+      # De Morgan's law would shorten that and obscure what is being asserted.
+      - path: _test\.go
+        linters:
+          - staticcheck
+        text: "QF1001:"
