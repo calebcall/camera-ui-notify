@@ -7,14 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-11
+
 ### Fixed
+
+- **No more duplicate notifications for AI descriptions.** camera.ui announces a detection, then
+  republishes the same notification once the AI description is ready — same `tag`, plus
+  `silent: true` to mark it as an update rather than a new alert. Both fields were previously
+  ignored, so every detection arrived twice, both times with sound. Now:
+  - **Telegram** and **Discord** replace the original message in place (`editMessageText` /
+    `editMessageCaption`, `PATCH .../messages/{id}`), so one notification's text improves rather
+    than a second one appearing. Message ids are held in memory per tag for 15 minutes; after a
+    restart, or if the original was deleted, the update falls back to a new quiet message. Only
+    the `silent` follow-up replaces — detection tags repeat across events, so a new alert reusing
+    a tag always posts a new message rather than rewriting chat history.
+  - **ntfy** (priority `1`), **Gotify** (priority `3`) and **Pushover** (priority `-1`) deliver the
+    update without sound or vibration.
+  - **Grafana** resolves the update onto the event it already opened: annotations mode patches the
+    existing annotation's text, Alertmanager and IRM modes re-send under the same fingerprint so
+    the alert updates instead of a second one firing.
+  - The **generic webhook** payload forwards the new `silent` field alongside the existing `tag`.
+  - `critical` notifications ignore `silent` and always alert, per the SDK contract.
 
 - **README no longer documents `grafana_irm_ttl`.** The field was removed from the code in 0.7.1
   when IRM turned out to ignore `endsAt`, but its row survived in the config table — directly
   contradicting the paragraph below it stating that IRM groups do not auto-resolve.
 
+### Added
+
+- **"Follow-up updates" setting** (`silent_updates`) — `Deliver quietly (no sound)` (default) or
+  `Skip the update entirely`, for anyone who wants exactly one notification per event on the
+  backends that can't replace a delivered message. Backends that replace in place still receive
+  the update under `skip`, since it adds no entry to the notification list.
+
 ### Changed
 
+- **camera.ui Go SDK bumped to v1.2.22** (from v1.2.6) for `Notification.Silent`.
+- **Linting consolidated on golangci-lint**, configured by a new `.golangci.yml`. `npm run lint`
+  previously chained `staticcheck && golangci-lint run`, so a staticcheck finding short-circuited
+  the `&&` and golangci-lint never ran at all. golangci-lint already bundles staticcheck's
+  analyzers, so the standalone binary is gone from the script; the config excludes three
+  deliberate idioms (`defer resp.Body.Close()`, and nil-`Context` / De Morgan findings in tests)
+  and `npm run lint` now reports zero issues.
 - **`package.json` description now lists every backend.** It had said "ntfy, Gotify, or a generic
   webhook" since 0.4.0, omitting Pushover, Telegram, Discord and Grafana. This is the text npm
   shows on the package listing. ([#29](https://github.com/calebcall/camera-ui-notify/issues/29))

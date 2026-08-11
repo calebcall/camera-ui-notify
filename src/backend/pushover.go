@@ -100,13 +100,21 @@ func (p *pushover) ParseTarget(input map[string]any) (map[string]string, error) 
 	}, nil
 }
 
-// pushoverPriority maps notif.Severity onto Pushover's priority parameter.
+// pushoverPriority maps a notification onto Pushover's priority parameter.
 // Pushover's emergency priority (2) requires retry/expire parameters and
 // repeats delivery until acknowledged, which is wrong for detection
 // notifications, so this never returns 2: SeverityInfo (and unknown/empty)
 // maps to 0 (normal), everything else maps to 1 (high).
-func pushoverPriority(sev sdk.Severity) int {
-	if sev == sdk.SeverityInfo || sev == "" {
+//
+// Pushover has no way to replace an already-delivered message, so a silent
+// update-only publish (the AI description superseding its detection alert)
+// maps to -1 (quiet) instead: it still reaches the device and the message
+// list, but generates no sound or vibration.
+func pushoverPriority(notif sdk.Notification) int {
+	if SilentDelivery(notif) {
+		return -1
+	}
+	if notif.Severity == sdk.SeverityInfo || notif.Severity == "" {
 		return 0
 	}
 	return 1
@@ -124,7 +132,7 @@ func (p *pushover) Send(ctx context.Context, cfg map[string]string, notif sdk.No
 		"user":     cfg["user"],
 		"title":    notif.Title,
 		"message":  message,
-		"priority": strconv.Itoa(pushoverPriority(notif.Severity)),
+		"priority": strconv.Itoa(pushoverPriority(notif)),
 	}
 	// url_title comes from DeepLinkLabel so a non-detection notification
 	// (plugin update, system alert) isn't labelled "Open camera".

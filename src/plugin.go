@@ -14,6 +14,21 @@ import (
 var _ sdk.NotifierInterface = (*NotifyPlugin)(nil)
 var _ sdk.Plugin = (*NotifyPlugin)(nil)
 
+// Values of the "silent_updates" config field, which decides what happens to
+// a Notification carrying Silent — a republish that only updates an earlier
+// notification with the same Tag (see backend.SilentDelivery).
+const (
+	// silentUpdatesDeliver hands the update to the backend, which either
+	// edits the original message (Telegram, Discord) or delivers it without
+	// sound (ntfy, Gotify, Pushover). The default: the AI description is
+	// usually the more informative half of the pair, so losing it silently
+	// would be the worse failure.
+	silentUpdatesDeliver = "deliver"
+	// silentUpdatesSkip drops the update, leaving exactly one notification
+	// per event on backends that cannot replace a delivered message.
+	silentUpdatesSkip = "skip"
+)
+
 // NotifyPlugin is the camera.ui plugin entrypoint for Notify. It implements
 // sdk.Plugin (the camera lifecycle hooks, all no-ops here — Notify is a
 // PluginRoleHub that owns no cameras) and sdk.NotifierInterface
@@ -114,6 +129,21 @@ func (p *NotifyPlugin) StorageSchema() []sdk.JsonSchema {
 			Placeholder: "https://camera.example.com",
 			Description: "Optional. Used to turn camera.ui's relative deep links into absolute tap-through URLs (e.g. ntfy Click).",
 			Store:       &storeTrue,
+		},
+		{
+			Type:  sdk.JsonSchemaTypeString,
+			Key:   "silent_updates",
+			Title: "Follow-up updates",
+			Description: "What to do when camera.ui republishes a notification to update one it already sent — " +
+				"most often the AI description arriving after the initial detection alert. " +
+				"Telegram and Discord edit the original message either way; this controls the backends that cannot.",
+			Enum: []string{silentUpdatesDeliver, silentUpdatesSkip},
+			EnumLabels: map[string]string{
+				silentUpdatesDeliver: "Deliver quietly (no sound)",
+				silentUpdatesSkip:    "Skip the update entirely",
+			},
+			DefaultValue: silentUpdatesDeliver,
+			Store:        &storeTrue,
 		},
 	}
 

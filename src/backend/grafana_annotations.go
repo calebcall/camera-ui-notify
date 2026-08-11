@@ -2,8 +2,11 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
 	"html"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,16 +61,62 @@ type grafanaAnnotationPayload struct {
 	Text string   `json:"text"`
 }
 
-func (a *grafanaAnnotations) send(ctx context.Context, client *http.Client, cfg map[string]string, notif sdk.Notification) error {
+// grafanaAnnotationPatch is the JSON body sent to PATCH
+// /api/annotations/:id. Only text and tags are revised — the annotation keeps
+// the timestamp of the detection that created it, not of the description that
+// arrived afterwards.
+type grafanaAnnotationPatch struct {
+	Tags []string `json:"tags"`
+	Text string   `json:"text"`
+}
+
+// grafanaAnnotationCreated is the slice of the create response this mode
+// reads: the id needed to patch the annotation later.
+type grafanaAnnotationCreated struct {
+	ID int64 `json:"id"`
+}
+
+func (a *grafanaAnnotations) send(ctx context.Context, client *http.Client, cfg map[string]string, notif sdk.Notification) (string, error) {
 	payload := grafanaAnnotationPayload{
 		Time: time.Now().UnixMilli(),
 		Tags: grafanaAnnotationTags(cfg["tags"], notif),
 		Text: grafanaAnnotationText(notif),
 	}
 
-	return grafanaPostJSON(ctx, client, cfg["server"]+"/api/annotations",
-		map[string]string{"Authorization": "Bearer " + cfg["token"]},
-		payload, "grafana: annotations")
+	body, err := grafanaRequestJSON(ctx, client, http.MethodPost, cfg["server"]+"/api/annotations",
+		grafanaAnnotationHeaders(cfg), payload, "grafana: annotations")
+	if err != nil {
+		return "", err
+	}
+
+	// The id is only needed to patch this annotation later; a response that
+	// doesn't carry one still delivered fine, so it is not an error here —
+	// the follow-up simply creates a second annotation instead of revising.
+	var created grafanaAnnotationCreated
+	if json.Unmarshal(body, &created) == nil && created.ID != 0 {
+		return strconv.FormatInt(created.ID, 10), nil
+	}
+	return "", nil
+}
+
+// update revises an annotation already created for this tag, so the AI
+// description replaces the initial detection text in place rather than
+// stacking a second marker on the dashboard at almost the same timestamp.
+func (a *grafanaAnnotations) update(ctx context.Context, client *http.Client, cfg map[string]string, notif sdk.Notification, prevID string) error {
+	payload := grafanaAnnotationPatch{
+		Tags: grafanaAnnotationTags(cfg["tags"], notif),
+		Text: grafanaAnnotationText(notif),
+	}
+
+	_, err := grafanaRequestJSON(ctx, client, http.MethodPatch,
+		cfg["server"]+"/api/annotations/"+url.PathEscape(prevID),
+		grafanaAnnotationHeaders(cfg), payload, "grafana: annotations")
+	return err
+}
+
+// grafanaAnnotationHeaders builds the bearer auth both requests share.
+func grafanaAnnotationHeaders(cfg map[string]string) map[string]string {
+	return map[string]string{"Authorization": "Bearer " + cfg["token"]}
 }
 
 // grafanaAnnotationTags builds the tag list a dashboard's annotation query
