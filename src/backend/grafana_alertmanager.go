@@ -251,10 +251,14 @@ func (a *grafanaAlertmanager) send(ctx context.Context, client *http.Client, cfg
 	if notif.Body != "" {
 		annotations["description"] = notif.Body
 	}
-	// Alertmanager will not render this, but it carries the snapshot through
-	// to downstream receiver templates that can.
+	// Alertmanager will not render either of these, but they carry the
+	// snapshot and the clip through to downstream receiver templates that
+	// can.
 	if notif.ImageURL != "" {
 		annotations["image_url"] = notif.ImageURL
+	}
+	if notif.VideoURL != "" {
+		annotations["video_url"] = notif.VideoURL
 	}
 
 	// cfg["ttl"] was already normalized by grafanaParseTTL during parse, but

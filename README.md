@@ -45,7 +45,7 @@ Publishes to [ntfy.sh](https://ntfy.sh) or a self-hosted ntfy server.
 | `topic`  | yes      | —                     | The ntfy topic to publish to.                      |
 | `token`  | no       | —                     | Access token for a protected/self-hosted topic, sent as `Authorization: Bearer <token>`. |
 
-Delivery: `POST {server}/{topic}` with the notification body as the request body, plus `Title`, `Priority` (1–5, from severity), `Click` (deep link, if set), and `Attach`/`Icon` (image URL, if set) headers.
+Delivery: `POST {server}/{topic}` with the notification body as the request body, plus `Title`, `Priority` (1–5, from severity), `Click` (deep link, if set), `Attach`/`Icon` (image URL, if set), and `Actions` (a "Play clip" view button, if a video clip is set) headers.
 
 ### Gotify
 
@@ -56,7 +56,7 @@ Publishes to a self-hosted [Gotify](https://gotify.net) server.
 | `server` | yes      | Base URL of the Gotify server. Trailing `/` trimmed. |
 | `token`  | yes      | Gotify application token, used to authenticate published messages. |
 
-Delivery: `POST {server}/message?token={token}` with a JSON body `{title, message, priority}` (priority 0–10, from severity), plus a `client::notification.click` extra for the deep link and a `bigImageUrl` extra when an image URL is set.
+Delivery: `POST {server}/message?token={token}` with a JSON body `{title, message, priority}` (priority 0–10, from severity), plus a `client::notification.click` extra for the deep link and a `bigImageUrl` extra when an image URL is set. A video clip is appended to the message text as a `Play clip: <url>` line.
 
 ### Generic webhook
 
@@ -69,7 +69,7 @@ Delivers to any HTTP endpoint you provide — the fallback for anything without 
 | `headerName`  | no       | —       | Optional custom header name (e.g. for a shared secret). Requires `headerValue` if set. |
 | `headerValue` | no       | —       | Value of the custom header. Requires `headerName` if set.       |
 
-Delivery: `{method} {url}` with `Content-Type: application/json` and (if configured) the custom header, carrying a JSON body of `{title, subtitle, body, severity, tag, silent, imageUrl, deepLink, data, createdAt, thumbnailBase64}`.
+Delivery: `{method} {url}` with `Content-Type: application/json` and (if configured) the custom header, carrying a JSON body of `{title, subtitle, body, severity, tag, silent, imageUrl, videoUrl, deepLink, data, createdAt, thumbnailBase64}`.
 
 ### Pushover
 
@@ -80,7 +80,7 @@ Hosted push to the [Pushover](https://pushover.net) app.
 | `token`  | yes      | Pushover application API token/key.            |
 | `user`   | yes      | Your Pushover user or group key.               |
 
-Delivery: `POST https://api.pushover.net/1/messages.json` with title/message and a priority (Info→0 normal, everything higher→1 high; never emergency). The snapshot **image** is sent as an `attachment`, and an absolute deep link becomes a supplementary `url` titled "Open camera" for a detection or "Open in camera.ui" for anything else.
+Delivery: `POST https://api.pushover.net/1/messages.json` with title/message and a priority (Info→0 normal, everything higher→1 high; never emergency). The snapshot **image** is sent as an `attachment`, and an absolute deep link becomes a supplementary `url` titled "Open camera" for a detection or "Open in camera.ui" for anything else. A video clip takes that `url` slot when no deep link claims it, and otherwise appends a `Play clip: <url>` line to the message.
 
 ### Telegram
 
@@ -90,8 +90,9 @@ Delivers to a chat via a [Telegram bot](https://core.telegram.org/bots).
 | ------- | -------- | -------------------------------------------------------- |
 | `token` | yes      | Bot token from @BotFather.                               |
 | `chat`  | yes      | Chat ID to deliver to.                                   |
+| `clip`  | no       | **Upload video clips** — off by default. See [Video clips](#video-clips-video-in-push). |
 
-Delivery: `sendPhoto` (with the snapshot **image** + caption) when a thumbnail is present, otherwise `sendMessage`. An absolute deep link is added as an inline button, labelled "Open camera" when it opens a camera page and "Open in camera.ui" otherwise.
+Delivery: `sendPhoto` (with the snapshot **image** + caption) when a thumbnail is present, otherwise `sendMessage` — or `sendVideo` when clip upload is on and the notification carries a clip. An absolute deep link is added as an inline button, labelled "Open camera" when it opens a camera page and "Open in camera.ui" otherwise; a video clip adds a second "Play clip" button below it, unless it is being uploaded.
 
 ### Discord
 
@@ -100,8 +101,9 @@ Delivers to a channel via a Discord [webhook](https://support.discord.com/hc/en-
 | Field     | Required | Notes                                   |
 | --------- | -------- | --------------------------------------- |
 | `webhook` | yes      | Channel webhook URL.                    |
+| `clip`    | no       | **Upload video clips** — off by default. See [Video clips](#video-clips-video-in-push). |
 
-Delivery: a rich embed (title, body, severity color — blue/yellow/red) with the snapshot **image** attached; an absolute deep link makes the title a link.
+Delivery: a rich embed (title, body, severity color — blue/yellow/red) with the snapshot **image** attached; an absolute deep link makes the title a link, and a video clip is appended to the description as a `Play clip` link — or uploaded as a second attachment when clip upload is on.
 
 ### Grafana
 
@@ -204,6 +206,10 @@ timer and per-event state, and a restart would strand the group open anyway. Clo
 > annotations have no image field at all, and alerts carry the URL as an `image_url` annotation
 > that Grafana itself won't render but downstream notification templates can use.
 
+> **Video clips:** annotations mode adds a `Play clip` anchor to the annotation tooltip; the
+> alertmanager and IRM modes carry the URL as a `video_url` annotation, alongside `image_url` and
+> on the same terms — Grafana won't render it, downstream templates can use it.
+
 > **Secrets in logs:** transport failures never log the bot token / webhook URL / other
 > URL-embedded secret — request URLs are redacted from delivery errors.
 
@@ -233,6 +239,64 @@ Only the `silent` follow-up replaces. Detection tags repeat across events (`moti
 
 If you would rather never see the follow-up on a backend that can't replace, set **Follow-up updates** to `Skip the update entirely` in the plugin settings. Backends that replace in place still receive it under that setting, since editing adds nothing to the notification list — with the one caveat that a lost message id (restart, deleted message) turns that edit into a new quiet message.
 
+## Video clips ("Video in Push")
+
+camera.ui 2.1.6 added `videoUrl` to the notification payload: a short MP4 of the recording that
+triggered the alert, published when the camera — or, for a multi-camera episode, the episode —
+has **Video in Push** switched on under its notification settings. Whether a clip is published at
+all is decided there, per camera, not here — this plugin only forwards what it is handed.
+
+### By default: the clip is a link
+
+Nothing this plugin talks to is the first-party mobile app, so no backend plays the clip *inside*
+the push the way an iOS attachment does. What each one can do is offer the clip as a link, opened
+in the phone's own browser or player — already authenticated to your server. The rule is the same
+everywhere: **the clip is added, never substituted.** The snapshot keeps its attachment slot and
+the deep link keeps its click target, because the deep link opens the event in camera.ui, from
+which the recording is one tap away, whereas the clip on its own is a dead end.
+
+| Backend         | How the clip is surfaced                                                          |
+| --------------- | ----------------------------------------------------------------------------------- |
+| ntfy            | A `Play clip` **view action button** (the single `Attach` slot stays with the snapshot). |
+| Telegram        | A second **inline button** below the deep-link button.                              |
+| Discord         | A `Play clip` link at the end of the embed description.                             |
+| Pushover        | The supplementary `url` when no deep link claims it; otherwise a line in the message. |
+| Gotify          | A `Play clip: <url>` line appended to the message text.                             |
+| Grafana         | An anchor in the annotation tooltip; a `video_url` annotation in alertmanager/IRM modes. |
+| Generic webhook | A `videoUrl` field in the JSON payload, forwarded verbatim.                         |
+
+**A linked clip has to be reachable from the phone.** camera.ui publishes the URL absolute; a
+server-relative one is made absolute with the **camera.ui Base URL** setting, the same way deep
+links are. Without that setting a relative clip URL is dropped rather than delivered as a link
+that cannot open — except on the generic webhook, whose receiver is a machine that may well be
+able to resolve it, so there it is forwarded as-is.
+
+### Opt in: upload the clip (Telegram, Discord)
+
+Telegram and Discord can carry the video itself, and both render a real player in the chat. Turn
+on **Upload video clips** in the plugin settings for either one and the plugin downloads the clip
+from camera.ui and re-uploads the bytes to the service. Nothing outside your network ever fetches
+from your server — the plugin is the only client that touches the clip URL — so this works for an
+install that isn't reachable from the internet at all.
+
+| | Telegram | Discord |
+| --- | --- | --- |
+| Method | `sendVideo`, `supports_streaming` on so it plays while downloading | a `clip.mp4` file attachment beside the embed |
+| Snapshot | **replaced** — Telegram carries one media item per message | **kept**, still rendered inside the embed |
+| Size cap | 50 MB (the Bot API's own upload limit) | 8 MB (Discord allows 10 MB per request on an unboosted server; the headroom is for the snapshot) |
+| Follow-up cost | none — `editMessageCaption` leaves the video in place, so the AI description doesn't re-download it | one more download + upload — Discord's edit drops any attachment the request doesn't re-send |
+
+It is off by default because it is the expensive path: the default merely passes a URL along,
+while this moves the whole file twice for every detection. The Discord row above is the one to
+weigh — a busy camera with clip upload on moves each clip **four** times once the AI description
+lands.
+
+**Every failure falls back to the link, never to a lost notification.** A clip past the size cap
+is not downloaded at all (a `Content-Length` over the limit fails before the body is read); a
+download that errors or stalls, and an upload the service rejects, both retry immediately as an
+ordinary send with the `Play clip` link. Oversize clips are rejected rather than truncated — a
+clipped MP4 is a broken upload, not a smaller video. Each fallback is logged with its reason.
+
 ## Configuring your target (v1: one active target)
 
 There is no "add device" flow. Instead, configure the plugin itself:
@@ -241,7 +305,8 @@ There is no "add device" flow. Instead, configure the plugin itself:
 2. In its settings, pick a **Service** (`ntfy`, `Gotify`, `Generic webhook`, `Pushover`, `Telegram`, `Discord`, or `Grafana`) from the dropdown built from the registered backends.
 3. Fill in that service's fields — only the selected service's fields are shown; the rest are condition-gated out.
 4. Optionally set **Follow-up updates** (see [Follow-up updates](#follow-up-updates-ai-descriptions)) — defaults to delivering the AI description quietly.
-5. Save. The config is validated (`ParseTarget`) the next time a notification is dispatched; `getDevices` then synthesizes one delivery target from it, and notifications from any publisher are delivered there.
+5. On Telegram or Discord, optionally turn on **Upload video clips** (see [Video clips](#video-clips-video-in-push)) — off by default.
+6. Save. The config is validated (`ParseTarget`) the next time a notification is dispatched; `getDevices` then synthesizes one delivery target from it, and notifications from any publisher are delivered there.
 
 This is a **single, instance-wide target** in v1 — there's no way to register several devices at once. Changing the config replaces the previous target rather than adding to it. Delivery for that one target is a single request per notification (no fan-out to worry about, since there's only one device).
 

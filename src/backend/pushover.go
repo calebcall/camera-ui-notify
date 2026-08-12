@@ -140,6 +140,20 @@ func (p *pushover) Send(ctx context.Context, cfg map[string]string, notif sdk.No
 		fields["url"] = notif.DeepLink
 		fields["url_title"] = DeepLinkLabel(notif)
 	}
+	// Pushover has exactly one supplementary url and no action buttons, and
+	// its attachment slot takes images only — so the clip (camera.ui 2.1.6+)
+	// claims that url when the deep link left it free, and otherwise goes
+	// into the message text, where Pushover's clients linkify it. The deep
+	// link keeps priority: it opens the event in camera.ui, from which the
+	// recording is one tap away, whereas the clip alone is a dead end.
+	if link := VideoLink(notif); link != "" {
+		if fields["url"] == "" {
+			fields["url"] = link
+			fields["url_title"] = VideoLinkLabel
+		} else {
+			fields["message"] += "\n\n" + VideoLinkLabel + ": " + link
+		}
+	}
 
 	baseURL := p.baseURL
 	if baseURL == "" {

@@ -63,10 +63,11 @@ type collapseEntry struct {
 	// messageID is the platform's own id for the delivered message (Telegram
 	// message_id, Discord message id), as the edit endpoint expects it.
 	messageID string
-	// photo records whether the delivered message carried an image. Telegram
-	// needs this to pick between editMessageText and editMessageCaption; a
-	// message posted as a photo can never be edited as text.
-	photo bool
+	// media records whether the delivered message carried an image or a
+	// video. Telegram needs this to pick between editMessageText and
+	// editMessageCaption; a message posted with media can never be edited as
+	// text, and both sendPhoto and sendVideo produce one.
+	media bool
 	// expiresAt is when this entry stops being eligible for replacement.
 	expiresAt time.Time
 }
@@ -138,7 +139,7 @@ func (s *collapseStore) lookup(key string) (collapseEntry, bool) {
 // remember records messageID as the message now occupying key, replacing any
 // earlier entry so a third publish under the same tag edits the message the
 // second one left behind.
-func (s *collapseStore) remember(key, messageID string, photo bool) {
+func (s *collapseStore) remember(key, messageID string, media bool) {
 	if s == nil || key == "" || messageID == "" {
 		return
 	}
@@ -152,7 +153,7 @@ func (s *collapseStore) remember(key, messageID string, photo bool) {
 	s.prune()
 	s.entries[key] = collapseEntry{
 		messageID: messageID,
-		photo:     photo,
+		media:     media,
 		expiresAt: s.clock().Add(s.ttl),
 	}
 }

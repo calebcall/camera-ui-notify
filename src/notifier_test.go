@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +32,13 @@ type fakeBackend struct {
 	mu         sync.Mutex
 	calls      []fakeSendCall
 	failTopics map[string]bool
+
+	// clipCalls records every SendWithClip invocation, and failClip makes
+	// them fail, so tests can drive notifier.go's clip-upload path and its
+	// fall back to the plain Send.
+	clipCalls []fakeSendCall
+	clips     [][]byte
+	failClip  bool
 }
 
 func (f *fakeBackend) ID() string    { return "fake" }
@@ -45,6 +53,14 @@ func (f *fakeBackend) Schema() []sdk.JsonSchema {
 			Required:  true,
 			Condition: []sdk.SchemaCondition{{Key: "service", Value: "fake"}},
 		},
+		// configuredDevice only forwards the fields a backend declares, so
+		// the clip-upload knob has to appear here for ParseTarget to see it.
+		{
+			Type:      sdk.JsonSchemaTypeString,
+			Key:       "clip_limit",
+			Title:     "Clip limit",
+			Condition: []sdk.SchemaCondition{{Key: "service", Value: "fake"}},
+		},
 	}
 }
 
@@ -53,7 +69,35 @@ func (f *fakeBackend) ParseTarget(input map[string]any) (map[string]string, erro
 	if topic == "" {
 		return nil, fmt.Errorf("topic is required")
 	}
-	return map[string]string{"topic": topic}, nil
+	cfg := map[string]string{"topic": topic}
+	// A test opts this backend into clip upload by storing the byte limit it
+	// should report, which stands in for a real backend's "Upload video
+	// clips" toggle plus its own size ceiling.
+	if limit, _ := input["clip_limit"].(string); limit != "" {
+		cfg["clip_limit"] = limit
+	}
+	return cfg, nil
+}
+
+// ClipLimit implements backend.ClipUploader.
+func (f *fakeBackend) ClipLimit(cfg map[string]string, n sdk.Notification) int {
+	limit, err := strconv.Atoi(cfg["clip_limit"])
+	if err != nil {
+		return 0
+	}
+	return limit
+}
+
+// SendWithClip implements backend.ClipUploader.
+func (f *fakeBackend) SendWithClip(ctx context.Context, cfg map[string]string, n sdk.Notification, clip []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.clipCalls = append(f.clipCalls, fakeSendCall{cfg: cfg, n: n})
+	f.clips = append(f.clips, clip)
+	if f.failClip {
+		return fmt.Errorf("fake clip upload rejected")
+	}
+	return nil
 }
 
 func (f *fakeBackend) Send(ctx context.Context, cfg map[string]string, n sdk.Notification) error {
@@ -71,6 +115,15 @@ func (f *fakeBackend) reset() {
 	defer f.mu.Unlock()
 	f.calls = nil
 	f.failTopics = map[string]bool{}
+	f.clipCalls = nil
+	f.clips = nil
+	f.failClip = false
+}
+
+func (f *fakeBackend) clipCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.clipCalls)
 }
 
 func (f *fakeBackend) callCount() int {
@@ -353,6 +406,87 @@ func TestSendNotification_BaseURLDoesNotAffectAlreadyAbsoluteDeepLink(t *testing
 	fb.mu.Unlock()
 	if gotDeepLink != "https://other.example.com/x" {
 		t.Fatalf("dispatched DeepLink = %q, want unchanged absolute URL", gotDeepLink)
+	}
+}
+
+// camera.ui publishes the "Video in Push" clip URL absolute, but a publisher
+// that hands over a server-relative clip path gets the same base_url
+// treatment the deep link does — otherwise backend.VideoLink would drop it as
+// unopenable and the clip would never reach the user.
+func TestSendNotification_BaseURLMakesRelativeVideoURLAbsolute(t *testing.T) {
+	fb := registerFakeBackend()
+	p := newTestPlugin(map[string]any{
+		"service":  "fake",
+		"topic":    "sometopic",
+		"base_url": "https://camera.example.com/",
+	})
+
+	n := &sdk.Notification{
+		Title:    "hello",
+		DeepLink: "/cameras/cam-1",
+		VideoURL: "/api/recordings/evt-42/clip.mp4",
+	}
+	if err := p.SendNotification([]string{"cfg:fake"}, n); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+	fb.mu.Lock()
+	got := fb.calls[0].n
+	fb.mu.Unlock()
+
+	want := "https://camera.example.com/api/recordings/evt-42/clip.mp4"
+	if got.VideoURL != want {
+		t.Fatalf("dispatched VideoURL = %q, want %q", got.VideoURL, want)
+	}
+	if got.DeepLink != "https://camera.example.com/cameras/cam-1" {
+		t.Fatalf("dispatched DeepLink = %q, want it absolutized too", got.DeepLink)
+	}
+	if n.VideoURL != "/api/recordings/evt-42/clip.mp4" {
+		t.Fatalf("caller's *n.VideoURL mutated: got %q, want unchanged relative path", n.VideoURL)
+	}
+}
+
+func TestSendNotification_BaseURLLeavesAbsoluteVideoURLUnchanged(t *testing.T) {
+	fb := registerFakeBackend()
+	p := newTestPlugin(map[string]any{
+		"service":  "fake",
+		"topic":    "sometopic",
+		"base_url": "https://camera.example.com",
+	})
+
+	n := &sdk.Notification{Title: "hello", VideoURL: "https://clips.example.com/evt-42.mp4"}
+	if err := p.SendNotification([]string{"cfg:fake"}, n); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+	fb.mu.Lock()
+	gotVideo := fb.calls[0].n.VideoURL
+	fb.mu.Unlock()
+	if gotVideo != "https://clips.example.com/evt-42.mp4" {
+		t.Fatalf("dispatched VideoURL = %q, want unchanged absolute URL", gotVideo)
+	}
+}
+
+// The clip must never be mistaken for a snapshot: resolveThumbnail fetches
+// ImageURL only, so a notification carrying a clip and no image still
+// delivers with no inline bytes rather than an MP4 in the photo slot.
+func TestSendNotification_VideoURLIsNotFetchedAsThumbnail(t *testing.T) {
+	fb := registerFakeBackend()
+	p := newTestPlugin(map[string]any{
+		"service": "fake",
+		"topic":   "sometopic",
+	})
+
+	n := &sdk.Notification{Title: "hello", VideoURL: "https://clips.example.com/evt-42.mp4"}
+	if err := p.SendNotification([]string{"cfg:fake"}, n); err != nil {
+		t.Fatalf("SendNotification: unexpected error %v", err)
+	}
+	fb.mu.Lock()
+	got := fb.calls[0].n
+	fb.mu.Unlock()
+	if len(got.Thumbnail) != 0 {
+		t.Fatalf("dispatched Thumbnail = %d bytes, want none — the clip is not a snapshot", len(got.Thumbnail))
+	}
+	if got.VideoURL != "https://clips.example.com/evt-42.mp4" {
+		t.Fatalf("dispatched VideoURL = %q, want it passed through", got.VideoURL)
 	}
 }
 

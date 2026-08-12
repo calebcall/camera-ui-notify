@@ -139,8 +139,14 @@ type webhookPayload struct {
 	// carrying the same Tag (e.g. the AI description superseding its
 	// detection alert) and so should not alert again. Forwarded verbatim:
 	// the receiver knows what its own endpoint can do about it.
-	Silent          bool              `json:"silent,omitempty"`
-	ImageURL        string            `json:"imageUrl,omitempty"`
+	Silent   bool   `json:"silent,omitempty"`
+	ImageURL string `json:"imageUrl,omitempty"`
+	// VideoURL is the "Video in Push" clip (camera.ui 2.1.6+), forwarded
+	// verbatim and unconditionally — unlike the human-facing backends this
+	// one has a machine on the other end, so it gets the raw value even when
+	// it is not an absolute http(s) URL and is free to do more with it than
+	// render a link.
+	VideoURL        string            `json:"videoUrl,omitempty"`
 	DeepLink        string            `json:"deepLink,omitempty"`
 	Data            map[string]string `json:"data,omitempty"`
 	CreatedAt       int64             `json:"createdAt"`
@@ -168,6 +174,7 @@ func (w *webhook) Send(ctx context.Context, cfg map[string]string, notif sdk.Not
 		Tag:       notif.Tag,
 		Silent:    SilentDelivery(notif),
 		ImageURL:  notif.ImageURL,
+		VideoURL:  notif.VideoURL,
 		DeepLink:  notif.DeepLink,
 		Data:      notif.Data,
 		CreatedAt: now().UnixMilli(),

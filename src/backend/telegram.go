@@ -23,8 +23,9 @@ const defaultTelegramBaseURL = "https://api.telegram.org"
 
 // telegram implements Backend for the Telegram Bot API
 // (https://core.telegram.org/bots/api). Delivery is a single HTTP POST to
-// /bot{token}/sendMessage (text only) or /bot{token}/sendPhoto (an inline
-// Thumbnail is present).
+// /bot{token}/sendMessage (text only), /bot{token}/sendPhoto (an inline
+// Thumbnail is present), or /bot{token}/sendVideo (the target opted into
+// clip upload and the notification carries one — see ClipLimit).
 type telegram struct {
 	// client performs the HTTP request. Defaulted by newTelegram;
 	// overridable in tests so Send never touches the real network.
@@ -81,6 +82,12 @@ func (tg *telegram) Schema() []sdk.JsonSchema {
 			Required:    true,
 			Condition:   cond,
 		},
+		clipUploadSchema("telegram_clip",
+			"Send the recording as a playable video (sendVideo) instead of a \"Play clip\" button. "+
+				"Telegram carries one media item per message, so the clip replaces the snapshot. "+
+				"Every clip is downloaded from camera.ui and re-uploaded to Telegram; anything over "+
+				"50 MB, or an upload Telegram rejects, falls back to the button.",
+			cond),
 	}
 }
 
@@ -102,10 +109,39 @@ func (tg *telegram) ParseTarget(input map[string]any) (map[string]string, error)
 		return nil, errors.New("telegram: chat is required")
 	}
 
-	return map[string]string{
+	cfg := map[string]string{
 		"token": token,
 		"chat":  chat,
-	}, nil
+	}
+	if parseClipOptIn(input, "telegram_clip") {
+		cfg["clip"] = clipOptIn
+	}
+	return cfg, nil
+}
+
+// telegramMaxClipBytes is the Bot API's upload ceiling for a file a bot
+// sends (50 MB). A clip past it is not fetched at all — Telegram would
+// reject the upload after the whole download had already been paid for.
+const telegramMaxClipBytes = 50 << 20
+
+// ClipLimit implements ClipUploader.
+//
+// It returns 0 for a silent follow-up that is going to be an edit:
+// editMessageCaption revises the text of a message and leaves its media
+// alone, so the clip already in the chat stays put and re-downloading it
+// would buy nothing. (If that edit then fails and falls back to a fresh
+// send, the replacement carries the clip as a button rather than a video —
+// the same degradation a lost message id already causes.)
+func (tg *telegram) ClipLimit(cfg map[string]string, notif sdk.Notification) int {
+	if cfg["clip"] != clipOptIn {
+		return 0
+	}
+	if SilentDelivery(notif) && notif.Tag != "" {
+		if _, pending := tg.collapse.lookup(collapseKey("telegram", cfg["token"], cfg["chat"], notif.Tag)); pending {
+			return 0
+		}
+	}
+	return telegramMaxClipBytes
 }
 
 // telegramInlineButton is a single button in a Telegram inline keyboard.
@@ -159,18 +195,27 @@ func telegramText(notif sdk.Notification) string {
 }
 
 // telegramReplyMarkupFor builds the tap-through inline-keyboard reply markup
-// for an absolute DeepLink, or nil when there is none. The button text comes
-// from DeepLinkLabel so a non-detection notification (plugin update, system
-// alert) isn't labelled "Open camera".
+// for notif, or nil when it names nothing to open. The deep-link button's
+// text comes from DeepLinkLabel so a non-detection notification (plugin
+// update, system alert) isn't labelled "Open camera".
+//
+// A clip (camera.ui 2.1.6+) adds a second button on its own row. This is the
+// default because Telegram carries one media item per message, so sending the
+// clip as a video costs the snapshot; the "Upload video clips" toggle opts
+// into paying that price, and when it is on the clip is already in the
+// message and WithoutVideoLink has stripped it before this is called.
 func telegramReplyMarkupFor(notif sdk.Notification) *telegramReplyMarkup {
-	if !strings.HasPrefix(notif.DeepLink, "http") {
+	var rows [][]telegramInlineButton
+	if strings.HasPrefix(notif.DeepLink, "http") {
+		rows = append(rows, []telegramInlineButton{{Text: DeepLinkLabel(notif), URL: notif.DeepLink}})
+	}
+	if link := VideoLink(notif); link != "" {
+		rows = append(rows, []telegramInlineButton{{Text: VideoLinkLabel, URL: link}})
+	}
+	if len(rows) == 0 {
 		return nil
 	}
-	return &telegramReplyMarkup{
-		InlineKeyboard: [][]telegramInlineButton{
-			{{Text: DeepLinkLabel(notif), URL: notif.DeepLink}},
-		},
-	}
+	return &telegramReplyMarkup{InlineKeyboard: rows}
 }
 
 // Send delivers a single notification via the Telegram Bot API. Telegram
@@ -184,6 +229,24 @@ func telegramReplyMarkupFor(notif sdk.Notification) *telegramReplyMarkup {
 // (message deleted, too old, "message is not modified", ...) falls back to a
 // fresh send, so a failed replacement still delivers the content.
 func (tg *telegram) Send(ctx context.Context, cfg map[string]string, notif sdk.Notification) error {
+	return tg.send(ctx, cfg, notif, nil)
+}
+
+// SendWithClip implements ClipUploader: the same delivery as Send, except
+// the message is a sendVideo carrying the clip's bytes.
+func (tg *telegram) SendWithClip(ctx context.Context, cfg map[string]string, notif sdk.Notification, clip []byte) error {
+	return tg.send(ctx, cfg, notif, clip)
+}
+
+func (tg *telegram) send(ctx context.Context, cfg map[string]string, notif sdk.Notification, clip []byte) error {
+	// With the clip in the message there is nothing for a "Play clip" button
+	// to add, so it is dropped before any of the rendering helpers see the
+	// notification — including on the edit path below, which must keep the
+	// same markup the original message was posted with.
+	if len(clip) > 0 {
+		notif = WithoutVideoLink(notif)
+	}
+
 	baseURL := tg.baseURL
 	if baseURL == "" {
 		baseURL = defaultTelegramBaseURL
@@ -218,10 +281,16 @@ func (tg *telegram) Send(ctx context.Context, cfg map[string]string, notif sdk.N
 
 	var req *http.Request
 	var err error
-	photo := len(notif.Thumbnail) > 0
-	if photo {
+	// Both a photo and a video are captioned media, which is the only
+	// distinction the edit path cares about: either one rules out
+	// editMessageText.
+	media := len(notif.Thumbnail) > 0 || len(clip) > 0
+	switch {
+	case len(clip) > 0:
+		req, err = tg.newSendVideoRequest(ctx, baseURL, token, chat, notif, clip)
+	case len(notif.Thumbnail) > 0:
 		req, err = tg.newSendPhotoRequest(ctx, baseURL, token, chat, notif)
-	} else {
+	default:
 		req, err = tg.newSendMessageRequest(ctx, baseURL, token, chat, notif)
 	}
 	if err != nil {
@@ -236,7 +305,7 @@ func (tg *telegram) Send(ctx context.Context, cfg map[string]string, notif sdk.N
 	if key != "" {
 		var parsed telegramSendResponse
 		if json.Unmarshal(body, &parsed) == nil && parsed.Result.MessageID != 0 {
-			tg.collapse.remember(key, strconv.FormatInt(parsed.Result.MessageID, 10), photo)
+			tg.collapse.remember(key, strconv.FormatInt(parsed.Result.MessageID, 10), media)
 		}
 	}
 
@@ -254,7 +323,7 @@ func (tg *telegram) edit(ctx context.Context, baseURL, token, chat string, notif
 		ReplyMarkup: telegramReplyMarkupFor(notif),
 	}
 	method := "editMessageText"
-	if prev.photo {
+	if prev.media {
 		method = "editMessageCaption"
 		payload.Caption = telegramText(notif)
 	} else {
@@ -330,13 +399,46 @@ func (tg *telegram) newSendMessageRequest(ctx context.Context, baseURL, token, c
 }
 
 // newSendPhotoRequest builds the multipart/form-data sendPhoto request used
-// when notif.Thumbnail is present: chat_id, a "photo" file part (filename
-// snapshot.jpg, Content-Type image/jpeg), a "caption" field carrying the
-// same title/body text, and — when DeepLink is absolute — a "reply_markup"
-// field carrying the inline keyboard as a JSON string (multipart form
-// fields are always strings; the Bot API accepts reply_markup this way for
-// non-JSON requests).
+// when notif.Thumbnail is present: the shared caption/markup fields plus a
+// "photo" file part (filename snapshot.jpg, Content-Type image/jpeg).
 func (tg *telegram) newSendPhotoRequest(ctx context.Context, baseURL, token, chat string, notif sdk.Notification) (*http.Request, error) {
+	return newTelegramMediaRequest(ctx, baseURL+"/bot"+token+"/sendPhoto", chat, notif,
+		telegramMediaPart{field: "photo", filename: "snapshot.jpg", contentType: "image/jpeg", data: notif.Thumbnail},
+		nil)
+}
+
+// newSendVideoRequest builds the multipart/form-data sendVideo request used
+// when the target has opted into clip upload: the same shared fields plus a
+// "video" file part carrying the clip. supports_streaming lets Telegram play
+// it inline while it downloads instead of making the user wait for the whole
+// file.
+//
+// Telegram generates its own poster frame, so notif.Thumbnail is not sent:
+// the Bot API's own "thumbnail" part is capped at 320px and 200 kB, which a
+// camera snapshot will usually exceed.
+func (tg *telegram) newSendVideoRequest(ctx context.Context, baseURL, token, chat string, notif sdk.Notification, clip []byte) (*http.Request, error) {
+	return newTelegramMediaRequest(ctx, baseURL+"/bot"+token+"/sendVideo", chat, notif,
+		telegramMediaPart{field: "video", filename: "clip.mp4", contentType: "video/mp4", data: clip},
+		map[string]string{"supports_streaming": "true"})
+}
+
+// telegramMediaPart describes the one file part a captioned media request
+// carries.
+type telegramMediaPart struct {
+	field       string
+	filename    string
+	contentType string
+	data        []byte
+}
+
+// newTelegramMediaRequest builds a captioned-media multipart request
+// (sendPhoto / sendVideo). Both carry the same envelope: chat_id, a
+// "caption" field with the title/body text, disable_notification for a
+// silent publish, and — when there is anything to link — a "reply_markup"
+// field holding the inline keyboard as a JSON string (multipart form fields
+// are always strings; the Bot API accepts reply_markup this way for
+// non-JSON requests). extra carries whatever else the specific method wants.
+func newTelegramMediaRequest(ctx context.Context, reqURL, chat string, notif sdk.Notification, media telegramMediaPart, extra map[string]string) (*http.Request, error) {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 
@@ -360,22 +462,26 @@ func (tg *telegram) newSendPhotoRequest(ctx context.Context, baseURL, token, cha
 			return nil, err
 		}
 	}
+	for k, v := range extra {
+		if err := mw.WriteField(k, v); err != nil {
+			return nil, err
+		}
+	}
 
 	h := make(textproto.MIMEHeader)
-	h.Set("Content-Disposition", `form-data; name="photo"; filename="snapshot.jpg"`)
-	h.Set("Content-Type", "image/jpeg")
+	h.Set("Content-Disposition", `form-data; name="`+media.field+`"; filename="`+media.filename+`"`)
+	h.Set("Content-Type", media.contentType)
 	part, err := mw.CreatePart(h)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := part.Write(notif.Thumbnail); err != nil {
+	if _, err := part.Write(media.data); err != nil {
 		return nil, err
 	}
 	if err := mw.Close(); err != nil {
 		return nil, err
 	}
 
-	reqURL := baseURL + "/bot" + token + "/sendPhoto"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, &buf)
 	if err != nil {
 		return nil, err
