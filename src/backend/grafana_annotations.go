@@ -152,5 +152,11 @@ func grafanaAnnotationText(notif sdk.Notification) string {
 	if link := grafanaAbsoluteDeepLink(notif); link != "" {
 		parts = append(parts, `<a href="`+html.EscapeString(link)+`">`+html.EscapeString(DeepLinkLabel(notif))+`</a>`)
 	}
+	// The clip gets its own anchor rather than sharing the deep link's: a
+	// dashboard reader following the marker back to the event wants the
+	// recording, and Grafana's tooltip has room for both.
+	if link := VideoLink(notif); link != "" {
+		parts = append(parts, `<a href="`+html.EscapeString(link)+`">`+html.EscapeString(VideoLinkLabel)+`</a>`)
+	}
 	return strings.Join(parts, "<br>")
 }

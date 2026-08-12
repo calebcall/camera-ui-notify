@@ -104,7 +104,7 @@ func TestCollapseStoreRememberAndLookup(t *testing.T) {
 	if entry.messageID != "42" {
 		t.Errorf("messageID = %q, want %q", entry.messageID, "42")
 	}
-	if !entry.photo {
+	if !entry.media {
 		t.Errorf("photo = false, want true")
 	}
 
@@ -112,7 +112,7 @@ func TestCollapseStoreRememberAndLookup(t *testing.T) {
 	// publish edits the message the second one left behind.
 	s.remember("k", "43", false)
 	entry, _ = s.lookup("k")
-	if entry.messageID != "43" || entry.photo {
+	if entry.messageID != "43" || entry.media {
 		t.Errorf("entry = %+v, want messageID 43 and photo false", entry)
 	}
 

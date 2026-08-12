@@ -176,6 +176,12 @@ func (i *grafanaIRM) send(ctx context.Context, client *http.Client, cfg map[stri
 	if notif.Body != "" {
 		annotations["description"] = notif.Body
 	}
+	// IRM's payload has an image_url field but no video counterpart, so the
+	// clip rides in the annotations, where escalation-chain templates can
+	// reach it — the same place the Alertmanager mode puts it.
+	if notif.VideoURL != "" {
+		annotations["video_url"] = notif.VideoURL
+	}
 
 	link := grafanaAbsoluteDeepLink(notif)
 

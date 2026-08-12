@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-12
+
+### Added
+
+- **Video clips are surfaced on every backend.** camera.ui 2.1.6 added `videoUrl` to the
+  notification payload — a short MP4 of the recording behind the alert, published when a camera
+  (or an episode) has **Video in Push** enabled. Whether a clip is published at all is decided
+  there, not here; this is what every backend now does with one by default. None of them is the
+  first-party app, so none plays the clip inside the push itself; each offers it as a link the
+  phone opens in its own player, and in every case the clip is **added, never substituted** — the
+  snapshot keeps its attachment slot and the deep link keeps its click target. (Telegram and
+  Discord can go further; see the opt-in below.)
+  - **ntfy** — a `Play clip` view action button. ntfy allows one attachment per message and that
+    stays with the snapshot, which is the part every client renders inline. Published as a JSON
+    `Actions` header so a signed clip URL's commas and semicolons survive.
+  - **Telegram** — a second inline-keyboard button below the deep-link button.
+  - **Discord** — a `Play clip` link at the end of the embed description, with the target wrapped
+    in `<>` so a URL containing a closing paren still parses as one link.
+  - **Pushover** — the supplementary `url` (titled `Play clip`) when no deep link has claimed it,
+    otherwise a line appended to the message.
+  - **Gotify** — a `Play clip: <url>` line appended to the message text.
+  - **Grafana** — an anchor in the annotation tooltip (annotations mode); a `video_url`
+    annotation alongside `image_url` in alertmanager and IRM modes, for downstream templates.
+  - **Generic webhook** — a `videoUrl` field in the JSON payload.
+
+- **"Upload video clips" setting for Telegram and Discord** (`telegram_clip` / `discord_clip`) —
+  off by default. Both services can carry the video itself and render a real player, so with this
+  on the plugin downloads the clip from camera.ui and re-uploads the bytes. Nothing outside your
+  network fetches from your server: the plugin is the only client that ever touches the clip URL,
+  so this works on an install that isn't reachable from the internet.
+  - **Telegram** posts `sendVideo` with `supports_streaming`, so the clip plays while it
+    downloads. Telegram carries one media item per message, so the clip replaces the snapshot.
+    Capped at the Bot API's own 50 MB upload limit. A silent follow-up costs nothing extra —
+    `editMessageCaption` leaves the video in place, so the clip is not re-downloaded for it.
+  - **Discord** attaches the clip as `clip.mp4` beside the embed, so the snapshot is kept. Capped
+    at 8 MB, leaving headroom under Discord's 10 MB per-request limit for the snapshot in the same
+    body. Discord's edit endpoint drops any attachment the request doesn't re-send, so a follow-up
+    costs a second download and upload.
+  - **Every failure degrades to the link rather than losing the notification**: a clip past the
+    cap is not downloaded at all (an over-limit `Content-Length` fails before the body is read), a
+    download that errors or stalls retries as an ordinary send, and so does an upload the service
+    rejects. Oversize clips are rejected, never truncated — a clipped MP4 is a broken upload, not
+    a smaller video. Each fallback is logged with its reason.
+
+- **The camera.ui Base URL setting now absolutizes a relative clip URL too**, exactly as it
+  already did for deep links. camera.ui publishes `videoUrl` absolute, but a publisher that sends
+  a server-relative path would otherwise hand the backends a link no phone could open. Without
+  `base_url` set, a relative clip URL is dropped rather than delivered dead — except on the
+  generic webhook, whose receiver is a machine that may be able to resolve it, so there it is
+  forwarded verbatim.
+
+### Changed
+
+- **camera.ui Go SDK bumped to v1.2.24** (from v1.2.22) for `Notification.VideoURL`.
+- **`engines.camera.ui` raised to `>=2.1.6`** (from `>=2.0.24`), the release that publishes
+  `videoUrl`. Nothing in this version breaks on an older core — the field is simply absent and
+  every backend behaves as it did in 0.8.0 — but the plugin is now versioned against the core it
+  is written for.
+
 ## [0.8.0] - 2026-08-11
 
 ### Fixed

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -78,6 +79,12 @@ func (d *discord) Schema() []sdk.JsonSchema {
 			Required:    true,
 			Condition:   cond,
 		},
+		clipUploadSchema("discord_clip",
+			"Attach the recording to the message as a playable video instead of a \"Play clip\" link. "+
+				"The snapshot is kept alongside it. Every clip is downloaded from camera.ui and "+
+				"re-uploaded to Discord — and again when the AI description follows — so anything over "+
+				"8 MB, or an upload Discord rejects, falls back to the link.",
+			cond),
 	}
 }
 
@@ -93,9 +100,30 @@ func (d *discord) ParseTarget(input map[string]any) (map[string]string, error) {
 		return nil, errors.New("discord: webhook is required")
 	}
 
-	return map[string]string{
+	cfg := map[string]string{
 		"webhook": webhook,
-	}, nil
+	}
+	if parseClipOptIn(input, "discord_clip") {
+		cfg["clip"] = clipOptIn
+	}
+	return cfg, nil
+}
+
+// discordMaxClipBytes caps an uploaded clip at 8 MiB. Discord's own limit for
+// a webhook upload is 10 MiB on an unboosted server and applies to the whole
+// request, so the headroom leaves room for the snapshot travelling in the
+// same multipart body. A clip past this is not fetched at all — Discord would
+// reject the upload after the whole download had already been paid for.
+const discordMaxClipBytes = 8 << 20
+
+// ClipLimit implements ClipUploader. Unlike Telegram there is no cheap edit
+// here: Discord's edit endpoint drops any attachment the request does not
+// re-send, so a silent follow-up has to carry the clip again to keep it.
+func (d *discord) ClipLimit(cfg map[string]string, notif sdk.Notification) int {
+	if cfg["clip"] != clipOptIn {
+		return 0
+	}
+	return discordMaxClipBytes
 }
 
 // discordColorForSeverity maps notif.Severity onto a Discord embed color.
@@ -128,11 +156,35 @@ type discordEmbed struct {
 // discordAttachment describes a file part in an edit payload. Discord's
 // message-edit endpoint treats the attachments array as the complete list to
 // keep: omit it on an edit and every existing attachment is dropped, so an
-// edit that re-uploads the snapshot must name it here (id 0 = files[0]) and
-// one that carries no image must send an explicit empty array.
+// edit that re-uploads files must name each one here (id N = files[N]) and
+// one that carries none must send an explicit empty array.
 type discordAttachment struct {
 	ID       int    `json:"id"`
 	Filename string `json:"filename"`
+}
+
+// discordFile is one file part of a webhook request. The order of a
+// []discordFile is significant: it fixes both the files[N] part names and
+// the ids in the edit payload's attachments array, so the two cannot drift.
+type discordFile struct {
+	filename    string
+	contentType string
+	data        []byte
+}
+
+// discordFilesFor assembles the file parts for one delivery: the snapshot
+// first (so the embed's attachment://snapshot.jpg reference and files[0] line
+// up as they always have), then the clip when the target opted into
+// uploading it.
+func discordFilesFor(thumbnail, clip []byte) []discordFile {
+	var files []discordFile
+	if len(thumbnail) > 0 {
+		files = append(files, discordFile{filename: "snapshot.jpg", contentType: "image/jpeg", data: thumbnail})
+	}
+	if len(clip) > 0 {
+		files = append(files, discordFile{filename: "clip.mp4", contentType: "video/mp4", data: clip})
+	}
+	return files
 }
 
 // discordWebhookPayload is the JSON body posted to the webhook URL (and,
@@ -161,6 +213,18 @@ func discordEmbedFor(notif sdk.Notification) discordEmbed {
 	if strings.HasPrefix(notif.DeepLink, "http") {
 		embed.URL = notif.DeepLink
 	}
+	// An embed's own url is already the deep link, and Discord ignores the
+	// "video" object on a webhook embed (it only ever fills that one itself,
+	// for providers it recognises), so the clip is offered as a masked link
+	// at the end of the description. The target is wrapped in <> so a URL
+	// containing a closing paren — a signed query string, say — still parses
+	// as one link.
+	if link := VideoLink(notif); link != "" {
+		if embed.Description != "" {
+			embed.Description += "\n\n"
+		}
+		embed.Description += "[" + VideoLinkLabel + "](<" + link + ">)"
+	}
 	return embed
 }
 
@@ -175,12 +239,31 @@ func discordEmbedFor(notif sdk.Notification) discordEmbed {
 // message was deleted, ...) falls back to a fresh post, so a failed
 // replacement still delivers the content.
 func (d *discord) Send(ctx context.Context, cfg map[string]string, notif sdk.Notification) error {
+	return d.send(ctx, cfg, notif, nil)
+}
+
+// SendWithClip implements ClipUploader: the same delivery as Send, with the
+// clip uploaded as a second attachment that Discord renders as a player.
+// Unlike Telegram, Discord takes any number of files per message, so the
+// snapshot stays in the embed alongside it.
+func (d *discord) SendWithClip(ctx context.Context, cfg map[string]string, notif sdk.Notification, clip []byte) error {
+	return d.send(ctx, cfg, notif, clip)
+}
+
+func (d *discord) send(ctx context.Context, cfg map[string]string, notif sdk.Notification, clip []byte) error {
 	webhookURL := cfg["webhook"]
+	// With the clip attached to the message, the "Play clip" link in the
+	// description would only point at what is already there. Stripped before
+	// the embed is built so the edit path below renders identically.
+	if len(clip) > 0 {
+		notif = WithoutVideoLink(notif)
+	}
 	embed := discordEmbedFor(notif)
 	thumbnail := notif.Thumbnail
 	if len(thumbnail) > 0 {
 		embed.Image = &discordEmbedImage{URL: "attachment://snapshot.jpg"}
 	}
+	files := discordFilesFor(thumbnail, clip)
 
 	if ctx == nil {
 		ctx = context.Background()
@@ -197,7 +280,7 @@ func (d *discord) Send(ctx context.Context, cfg map[string]string, notif sdk.Not
 	// previous alert would erase it from the channel's history.
 	if SilentDelivery(notif) {
 		if prev, ok := d.collapse.lookup(key); ok {
-			if err := d.edit(ctx, webhookURL, prev.messageID, embed, thumbnail); err == nil {
+			if err := d.edit(ctx, webhookURL, prev.messageID, embed, files); err == nil {
 				return nil
 			}
 			// The stored message is unusable; drop it so we don't retry the
@@ -222,7 +305,7 @@ func (d *discord) Send(ctx context.Context, cfg map[string]string, notif sdk.Not
 		}
 	}
 
-	req, err := newDiscordRequest(ctx, http.MethodPost, postURL, payload, thumbnail)
+	req, err := newDiscordRequest(ctx, http.MethodPost, postURL, payload, files)
 	if err != nil {
 		return fmt.Errorf("discord: build request: %w", RedactRequestError(err))
 	}
@@ -237,7 +320,7 @@ func (d *discord) Send(ctx context.Context, cfg map[string]string, notif sdk.Not
 			ID string `json:"id"`
 		}
 		if json.Unmarshal(body, &created) == nil && created.ID != "" {
-			d.collapse.remember(key, created.ID, len(thumbnail) > 0)
+			d.collapse.remember(key, created.ID, len(files) > 0)
 		}
 	}
 
@@ -245,11 +328,16 @@ func (d *discord) Send(ctx context.Context, cfg map[string]string, notif sdk.Not
 }
 
 // edit replaces an already-delivered webhook message with notif's current
-// embed, re-uploading the snapshot when there is one.
-func (d *discord) edit(ctx context.Context, webhookURL, messageID string, embed discordEmbed, thumbnail []byte) error {
+// embed, re-uploading every file it should still carry.
+//
+// Discord's edit endpoint keeps only what the attachments array names, so
+// each file is re-sent rather than retained by id — which is also why a clip
+// costs a second download and upload when the AI description follows its
+// detection alert.
+func (d *discord) edit(ctx context.Context, webhookURL, messageID string, embed discordEmbed, files []discordFile) error {
 	attachments := []discordAttachment{}
-	if len(thumbnail) > 0 {
-		attachments = append(attachments, discordAttachment{ID: 0, Filename: "snapshot.jpg"})
+	for i, f := range files {
+		attachments = append(attachments, discordAttachment{ID: i, Filename: f.filename})
 	}
 	payload := discordWebhookPayload{
 		Embeds:      []discordEmbed{embed},
@@ -261,7 +349,7 @@ func (d *discord) edit(ctx context.Context, webhookURL, messageID string, embed 
 		return fmt.Errorf("discord: build edit request: %w", RedactRequestError(err))
 	}
 
-	req, err := newDiscordRequest(ctx, http.MethodPatch, editURL, payload, thumbnail)
+	req, err := newDiscordRequest(ctx, http.MethodPatch, editURL, payload, files)
 	if err != nil {
 		return fmt.Errorf("discord: build edit request: %w", RedactRequestError(err))
 	}
@@ -327,12 +415,12 @@ func discordMessageURL(webhookURL, messageID string) (string, error) {
 	return u.String(), nil
 }
 
-// newDiscordRequest builds either a plain JSON request or, when a thumbnail
-// is present, the multipart/form-data equivalent carrying payload_json plus
-// the image, for both the initial post and a later edit.
-func newDiscordRequest(ctx context.Context, method, targetURL string, payload discordWebhookPayload, thumbnail []byte) (*http.Request, error) {
-	if len(thumbnail) > 0 {
-		return newDiscordMultipartRequest(ctx, method, targetURL, payload, thumbnail)
+// newDiscordRequest builds either a plain JSON request or, when there are
+// files to attach, the multipart/form-data equivalent carrying payload_json
+// plus each file, for both the initial post and a later edit.
+func newDiscordRequest(ctx context.Context, method, targetURL string, payload discordWebhookPayload, files []discordFile) (*http.Request, error) {
+	if len(files) > 0 {
+		return newDiscordMultipartRequest(ctx, method, targetURL, payload, files)
 	}
 
 	buf, err := json.Marshal(payload)
@@ -349,10 +437,11 @@ func newDiscordRequest(ctx context.Context, method, targetURL string, payload di
 
 // newDiscordMultipartRequest builds a multipart/form-data request carrying
 // payload_json (the embeds, with the embed's image pointed at
-// attachment://snapshot.jpg) plus the thumbnail bytes as a "files[0]" file
-// part (filename snapshot.jpg, Content-Type image/jpeg), per
-// https://discord.com/developers/docs/resources/webhook#execute-webhook.
-func newDiscordMultipartRequest(ctx context.Context, method, targetURL string, payload discordWebhookPayload, thumbnail []byte) (*http.Request, error) {
+// attachment://snapshot.jpg) plus each file as a "files[N]" part, per
+// https://discord.com/developers/docs/resources/webhook#execute-webhook. N is
+// the file's index in files, which is the id an edit's attachments array uses
+// to refer to it.
+func newDiscordMultipartRequest(ctx context.Context, method, targetURL string, payload discordWebhookPayload, files []discordFile) (*http.Request, error) {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -365,15 +454,18 @@ func newDiscordMultipartRequest(ctx context.Context, method, targetURL string, p
 		return nil, err
 	}
 
-	h := make(textproto.MIMEHeader)
-	h.Set("Content-Disposition", `form-data; name="files[0]"; filename="snapshot.jpg"`)
-	h.Set("Content-Type", "image/jpeg")
-	part, err := mw.CreatePart(h)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := part.Write(thumbnail); err != nil {
-		return nil, err
+	for i, f := range files {
+		h := make(textproto.MIMEHeader)
+		h.Set("Content-Disposition",
+			`form-data; name="files[`+strconv.Itoa(i)+`]"; filename="`+f.filename+`"`)
+		h.Set("Content-Type", f.contentType)
+		part, err := mw.CreatePart(h)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := part.Write(f.data); err != nil {
+			return nil, err
+		}
 	}
 	if err := mw.Close(); err != nil {
 		return nil, err

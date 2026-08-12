@@ -24,6 +24,14 @@ var imageFetchClient = &http.Client{Timeout: 10 * time.Second}
 // can't exhaust memory. 8 MiB comfortably covers any camera snapshot.
 const maxThumbnailBytes = 8 << 20
 
+// clipFetchClient downloads a notification's VideoURL for the backends that
+// upload the clip's bytes rather than link to it (see backend.ClipUploader).
+// Its timeout is far longer than imageFetchClient's because the payload is
+// megabytes of video rather than one JPEG, but still bounded: a stalled
+// download must not hold the notification open indefinitely. Package-level so
+// tests can point it at an httptest server.
+var clipFetchClient = &http.Client{Timeout: 60 * time.Second}
+
 // notifierDeviceIDPrefix prefixes the selected service id to form the single
 // synthesized device's stable id (e.g. "cfg:ntfy"). Stable across calls
 // because it's derived purely from the currently configured service, not
@@ -141,8 +149,8 @@ func (p *NotifyPlugin) UpdateDevice(deviceID string, patch map[string]any) (*sdk
 func (p *NotifyPlugin) SendNotification(deviceIDs []string, n *sdk.Notification) error {
 	var errs []error
 
-	p.logf("notify: sendNotification for %d device(s): title=%q severity=%q hasThumbnail=%t imageUrl=%t deepLink=%t tag=%q silent=%t",
-		len(deviceIDs), n.Title, n.Severity, len(n.Thumbnail) > 0, n.ImageURL != "", n.DeepLink != "", n.Tag, n.Silent)
+	p.logf("notify: sendNotification for %d device(s): title=%q severity=%q hasThumbnail=%t imageUrl=%t videoUrl=%t deepLink=%t tag=%q silent=%t",
+		len(deviceIDs), n.Title, n.Severity, len(n.Thumbnail) > 0, n.ImageURL != "", n.VideoURL != "", n.DeepLink != "", n.Tag, n.Silent)
 
 	// camera.ui republishes a notification under the same Tag when it has
 	// more to say about an event it already announced — in practice, the AI
@@ -161,10 +169,22 @@ func (p *NotifyPlugin) SendNotification(deviceIDs []string, n *sdk.Notification)
 	// (e.g. ntfy's Click header) work correctly. The caller's *n is never
 	// mutated: every device sees either the original notification or an
 	// independent copy.
+	//
+	// VideoURL (camera.ui 2.1.6+, the "Video in Push" clip) gets the same
+	// treatment: camera.ui publishes it absolute, but a publisher that hands
+	// over a server-relative clip path would otherwise reach the backends as
+	// a link no external service can open, and backend.VideoLink would drop
+	// it.
 	toSend := *n
 	baseURL, _ := p.Storage.GetValue("base_url", "").(string)
-	if baseURL != "" && strings.HasPrefix(n.DeepLink, "/") {
-		toSend.DeepLink = strings.TrimRight(baseURL, "/") + n.DeepLink
+	if baseURL != "" {
+		root := strings.TrimRight(baseURL, "/")
+		if strings.HasPrefix(n.DeepLink, "/") {
+			toSend.DeepLink = root + n.DeepLink
+		}
+		if strings.HasPrefix(n.VideoURL, "/") {
+			toSend.VideoURL = root + n.VideoURL
+		}
 	}
 
 	// Some publishers (notably the closed NVR) attach the snapshot as a hosted
@@ -208,7 +228,7 @@ func (p *NotifyPlugin) SendNotification(deviceIDs []string, n *sdk.Notification)
 		}
 
 		p.logf("notify: dispatching to device %s via %q", id, service)
-		if err := b.Send(context.Background(), cfg, toSend); err != nil {
+		if err := p.deliver(context.Background(), b, cfg, toSend); err != nil {
 			wrapped := fmt.Errorf("device %s (%s): %w", id, service, err)
 			p.errorf("notify: send failed: %v", wrapped)
 			errs = append(errs, wrapped)
@@ -220,6 +240,81 @@ func (p *NotifyPlugin) SendNotification(deviceIDs []string, n *sdk.Notification)
 
 	p.logf("notify: sendNotification complete: %d delivered, %d failed", dispatched, len(errs))
 	return errors.Join(errs...)
+}
+
+// deliver hands notif to b, uploading the "Video in Push" clip as real media
+// when the target opted into it and the backend can carry it (Telegram's
+// sendVideo, a Discord file attachment). Everything else goes straight to
+// Send, which surfaces the clip as a link.
+//
+// Every step degrades to that same link rather than failing the notification:
+// a clip too large to fetch, a download that errors or stalls, an upload the
+// service rejects (a size limit lower than the one assumed here, an
+// unplayable file). Delivery is the point; the video is the bonus.
+func (p *NotifyPlugin) deliver(ctx context.Context, b backend.Backend, cfg map[string]string, notif sdk.Notification) error {
+	uploader, limit := backend.ClipUpload(b, cfg, notif)
+	if uploader == nil {
+		return b.Send(ctx, cfg, notif)
+	}
+
+	clip, err := fetchClip(ctx, clipFetchClient, backend.VideoLink(notif), limit)
+	if err != nil {
+		p.warnf("notify: could not fetch VideoURL for upload (delivering the clip as a link instead): %v",
+			backend.RedactRequestError(err))
+		return b.Send(ctx, cfg, notif)
+	}
+	p.logf("notify: fetched %d clip bytes from VideoURL for upload", len(clip))
+
+	if err := uploader.SendWithClip(ctx, cfg, notif, clip); err != nil {
+		p.warnf("notify: clip upload rejected, retrying with the clip as a link: %v",
+			backend.RedactRequestError(err))
+		return b.Send(ctx, cfg, notif)
+	}
+	return nil
+}
+
+// fetchClip GETs url and returns the clip, refusing anything larger than
+// limit bytes.
+//
+// Unlike fetchImage this rejects rather than truncates: a clipped MP4 is not
+// a smaller video, it is a broken upload, and delivering the URL as a link
+// beats attaching a file that won't play. A Content-Length past the limit
+// fails before the body is read at all, so an oversized clip costs one set of
+// response headers instead of a multi-megabyte download.
+func fetchClip(ctx context.Context, client *http.Client, url string, limit int) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("clip fetch: server responded %d", resp.StatusCode)
+	}
+	if resp.ContentLength > int64(limit) {
+		return nil, fmt.Errorf("clip fetch: clip is %d bytes, over this backend's %d-byte upload limit",
+			resp.ContentLength, limit)
+	}
+	// limit+1 so a body that fills the cap exactly is still distinguishable
+	// from one that overruns it; a chunked response has no Content-Length to
+	// have caught it above.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > limit {
+		return nil, fmt.Errorf("clip fetch: clip exceeds this backend's %d-byte upload limit", limit)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("clip fetch: empty response body")
+	}
+	return data, nil
 }
 
 // resolveThumbnail ensures the notification carries inline image bytes when the

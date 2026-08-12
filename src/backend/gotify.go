@@ -126,6 +126,16 @@ func (g *gotify) Send(ctx context.Context, cfg map[string]string, notif sdk.Noti
 	if body == "" {
 		body = notif.Title
 	}
+	// Gotify has no slot for a clip: client::notification carries exactly one
+	// click URL (already spent on the deep link) and one bigImageUrl, and
+	// there are no action buttons. So the clip is appended to the message
+	// text as a bare URL, which Gotify's clients linkify. Plain text rather
+	// than a markdown anchor deliberately: switching client::display to
+	// text/markdown to get one would also start interpreting the AI
+	// description's own punctuation as markup.
+	if link := VideoLink(notif); link != "" {
+		body += "\n\n" + VideoLinkLabel + ": " + link
+	}
 
 	// Gotify treats priority 0-3 as "silent" (no system notification, only
 	// an in-app list entry), so mapping Info->0 makes detections appear to

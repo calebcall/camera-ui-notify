@@ -3,6 +3,7 @@ package backend
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -104,6 +105,34 @@ func (n *ntfy) ParseTarget(input map[string]any) (map[string]string, error) {
 	return cfg, nil
 }
 
+// ntfyAction is one entry of the JSON array published in ntfy's Actions
+// header (https://docs.ntfy.sh/publish/#action-buttons).
+type ntfyAction struct {
+	Action string `json:"action"`
+	Label  string `json:"label"`
+	URL    string `json:"url"`
+}
+
+// ntfyVideoActions renders the Actions header value carrying a "view" button
+// for notif's clip, or "" when there is no usable clip URL.
+//
+// ntfy accepts either a comma-separated shorthand or a JSON array here; the
+// JSON form is used because a clip URL is free to contain the commas and
+// semicolons the shorthand treats as separators. json.Marshal escapes any
+// control character it encounters, so the result is always a single header
+// line.
+func ntfyVideoActions(notif sdk.Notification) string {
+	link := VideoLink(notif)
+	if link == "" {
+		return ""
+	}
+	buf, err := json.Marshal([]ntfyAction{{Action: "view", Label: VideoLinkLabel, URL: link}})
+	if err != nil {
+		return ""
+	}
+	return string(buf)
+}
+
 // Send delivers a single notification via an ntfy publish request. When an
 // inline Thumbnail is present, it is published as a file attachment (the
 // request body is the raw JPEG bytes) per
@@ -157,6 +186,14 @@ func (n *ntfy) Send(ctx context.Context, cfg map[string]string, notif sdk.Notifi
 	} else if notif.ImageURL != "" {
 		req.Header.Set("Attach", notif.ImageURL)
 		req.Header.Set("Icon", notif.ImageURL)
+	}
+	// The clip goes on an action button rather than into Attach: ntfy allows
+	// exactly one attachment per message, and taking it for the video would
+	// cost the snapshot — which is the part every ntfy client renders inline.
+	// A "view" action opens the URL in the phone's browser/player instead,
+	// and sits alongside the snapshot rather than replacing it.
+	if actions := ntfyVideoActions(notif); actions != "" {
+		req.Header.Set("Actions", actions)
 	}
 	if token := cfg["token"]; token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
